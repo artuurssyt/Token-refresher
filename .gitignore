@@ -5,14 +5,20 @@ obj/
 *.suo
 .vs/
 *.DotSettings.user
+*.swp
+*~
 
-# Published binaries (GitHub 100MB limit + not source)
+# Published binaries (GitHub 100MB limit — build locally)
 Done builds/
 publish/
 **/_staging/
 **/App/*.exe
 **/App/*.pdb
 **/App/*.dll
+*.exe
+*.dll
+!**/e_sqlite3.dll
+*.pdb
 
 # Secrets / exports — never commit
 exports/
@@ -20,8 +26,14 @@ exports/
 **/logs/
 *.dpapi
 phase0_report.md
+*refresh_tokens*.txt
+*access_tokens*.zip
+*access_tokens*.txt
+*access_tokens*.json
+meteor_sessions*.txt
+session_lines*.txt
 
-# Local investigation dumps (huge, not needed to build)
+# Local investigation dumps (not needed to build)
 localts/
 README.zip
 src/_AuthSmoke/
@@ -36,3 +48,4 @@ Desktop.ini
 *.nupkg
 project.lock.json
 artifacts/
+TestResults/
