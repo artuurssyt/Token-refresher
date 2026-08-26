@@ -1,0 +1,36 @@
+﻿# Build / IDE
+bin/
+obj/
+*.user
+*.suo
+.vs/
+*.DotSettings.user
+
+# Published binaries (GitHub 100MB limit + not source)
+Done builds/
+publish/
+**/_staging/
+**/App/*.exe
+**/App/*.pdb
+**/App/*.dll
+
+# Secrets / exports — never commit
+exports/
+**/credentials/
+**/logs/
+*.dpapi
+phase0_report.md
+
+# Local investigation dumps (huge, not needed to build)
+localts/
+README.zip
+
+# OS junk
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# .NET
+*.nupkg
+project.lock.json
+artifacts/
