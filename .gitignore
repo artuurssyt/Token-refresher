@@ -24,6 +24,8 @@ phase0_report.md
 # Local investigation dumps (huge, not needed to build)
 localts/
 README.zip
+src/_AuthSmoke/
+src/_DbProbe/
 
 # OS junk
 Thumbs.db
