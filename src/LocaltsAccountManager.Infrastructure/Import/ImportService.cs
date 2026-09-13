@@ -262,17 +262,8 @@ public sealed class ImportService : IImportService
         {
             if (addToPool && existingPoolAccount != null)
             {
-                record.InPool = false;
-                record.DuplicateOfRecordId = existingPoolAccount.Id;
-                record.ProcessingState = ProcessingState.Failed;
-                record.FailureStage = FailureStage.Parse;
-                record.ErrorCategory = ErrorCategory.MalformedInput;
-                record.ServiceErrorDetail =
-                    $"Already in pool as {existingPoolAccount.AuthenticatedMinecraftUsername ?? existingPoolAccount.ProvidedUsername ?? "account"}. Pool credential updated.";
-                record.IsErrorCauseConfirmed = true;
-                batch.DuplicatesFlagged++;
-                outcome = ImportLineOutcome.UpdatedPoolCredential;
-
+                // Keep pool credential fresh, but still queue a batch row so Start Processing
+                // can refresh these accounts on the Batch tab without using Pool refresh.
                 existingPoolAccount.CredentialReference = await _credentialStore
                     .ReplaceAsync(existingPoolAccount.CredentialReference!, parsed.CredentialPayload, cancellationToken)
                     .ConfigureAwait(false);
@@ -281,8 +272,32 @@ public sealed class ImportService : IImportService
                 existingPoolAccount.RetryCount = 0;
                 existingPoolAccount.ErrorCategory = ErrorCategory.None;
                 existingPoolAccount.FailureStage = FailureStage.None;
+                existingPoolAccount.ServiceErrorDetail = null;
                 existingPoolAccount.PoolJoinedAt ??= DateTimeOffset.UtcNow;
+                if (!string.IsNullOrWhiteSpace(parsed.ProvidedUsername))
+                {
+                    existingPoolAccount.ProvidedUsername ??= parsed.ProvidedUsername;
+                }
+
                 await _accountRepository.UpsertAsync(existingPoolAccount, cancellationToken).ConfigureAwait(false);
+
+                record.InPool = false;
+                record.DuplicateOfRecordId = null; // not an in-batch duplicate — allow Start Processing
+                record.CredentialReference = existingPoolAccount.CredentialReference;
+                record.AuthenticatedMinecraftUsername = existingPoolAccount.AuthenticatedMinecraftUsername;
+                record.AuthenticatedMinecraftUuid = existingPoolAccount.AuthenticatedMinecraftUuid;
+                record.ProcessingState = ProcessingState.Queued;
+                record.FailureStage = FailureStage.None;
+                record.ErrorCategory = ErrorCategory.None;
+                record.ServiceErrorDetail =
+                    $"Also in pool as {existingPoolAccount.AuthenticatedMinecraftUsername ?? existingPoolAccount.ProvidedUsername ?? "account"}; queued for batch refresh.";
+                record.IsErrorCauseConfirmed = false;
+                batch.DuplicatesFlagged++;
+                outcome = ImportLineOutcome.UpdatedPoolCredential;
+                if (!isDuplicateInBatch)
+                {
+                    fingerprintMap[parsed.TokenFingerprint] = record.Id;
+                }
             }
             else if (addToPool && !isDuplicateInBatch)
             {

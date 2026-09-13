@@ -9,6 +9,8 @@ using CommunityToolkit.Mvvm.Input;
 using LocaltsAccountManager.Core.Enums;
 using LocaltsAccountManager.Core.Interfaces;
 using LocaltsAccountManager.Core.Models;
+using LocaltsAccountManager.Infrastructure.Import;
+using LocaltsAccountManager.Infrastructure.Paths;
 using Microsoft.Win32;
 
 namespace LocaltsAccountManager.App.ViewModels;
@@ -131,7 +133,34 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private string _localtsConnectionStatus = "Localts API key not configured.";
 
+    [ObservableProperty]
+    private bool _poolAutoManageEnabled;
+
     partial void OnLibrarySearchTextChanged(string value) => _libraryView.Refresh();
+
+    partial void OnPoolAutoManageEnabledChanged(bool value)
+    {
+        var settings = _settingsStore.Load();
+        if (settings.PoolAutoManageEnabled == value && settings.PoolAutoManageOptInAcknowledged)
+        {
+            return;
+        }
+
+        settings.PoolAutoManageEnabled = value;
+        settings.PoolAutoManageOptInAcknowledged = true;
+        _settingsStore.Save(settings);
+
+        _poolAutoManageTimer.Stop();
+        if (value)
+        {
+            StartPoolAutoManageTimer();
+            PoolStatusMessage = "Pool auto-refresh enabled (background timer only — not on launch).";
+        }
+        else
+        {
+            PoolStatusMessage = "Pool auto-refresh off. Use Refresh Pool when you want to refresh.";
+        }
+    }
 
     public AccountRowViewModel? SelectedAccount
     {
@@ -196,10 +225,132 @@ public partial class MainViewModel : ObservableObject
 
         try
         {
+            _currentBatch = await _importService.ImportFileAsync(dialog.FileName, ImportDestination.ActiveOnly).ConfigureAwait(true);
+            await ReloadAccountsAsync().ConfigureAwait(true);
+            await ReloadPoolAccountsAsync().ConfigureAwait(true);
+            StatusMessage =
+                $"Imported {_currentBatch.TotalRecords} records from {Path.GetFileName(dialog.FileName)} into this batch (not added to Pool). Click Start Processing to refresh.";
+            NotifyBatchCommands();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(ex.Message, "Import failed", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    [RelayCommand]
+    private async Task ExtractMsaRefreshTokensAsync()
+    {
+        var open = new OpenFileDialog
+        {
+            Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*",
+            Title = "Select dump / credential file"
+        };
+
+        if (open.ShowDialog() != true)
+        {
+            return;
+        }
+
+        try
+        {
+            await using var stream = File.OpenRead(open.FileName);
+            var extracted = await Task.Run(() => RefreshTokenLineExtractor.ExtractFromStream(stream)).ConfigureAwait(true);
+
+            if (extracted.Lines.Count == 0)
+            {
+                MessageBox.Show(
+                    $"No MSA refresh tokens found.\nScanned: {extracted.ScannedLines}\nMissing refresh: {extracted.MissingRefresh}\nMalformed: {extracted.Malformed}",
+                    "Extract MSA refresh tokens",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                return;
+            }
+
+            var settings = _settingsStore.Load();
+            var exportDir = ApplicationPaths.EnsureWritableDirectory(
+                string.IsNullOrWhiteSpace(settings.DefaultExportDirectory)
+                    || ApplicationPaths.NeedsPortableExportMigration(settings.DefaultExportDirectory)
+                    ? ApplicationPaths.DefaultExportDirectory
+                    : settings.DefaultExportDirectory,
+                ApplicationPaths.DefaultExportDirectory,
+                ApplicationPaths.LocalAppDataExports);
+            Directory.CreateDirectory(exportDir);
+            var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            var defaultName = $"msa_refresh_extracted_{stamp}.txt";
+            var save = new SaveFileDialog
+            {
+                Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*",
+                Title = "Save extracted username:refresh lines",
+                InitialDirectory = exportDir,
+                FileName = defaultName
+            };
+
+            if (save.ShowDialog() != true)
+            {
+                return;
+            }
+
+            var outputLines = new List<string>
+            {
+                "# Extracted MSA refresh tokens (username:refresh). Keep private."
+            };
+            outputLines.AddRange(RefreshTokenLineExtractor.ToUsernameTokenLines(extracted.Lines));
+
+            await File.WriteAllLinesAsync(save.FileName, outputLines).ConfigureAwait(true);
+
+            LastExportSummary =
+                $"Extracted {extracted.Lines.Count} MSA refresh line(s) from {extracted.ScannedLines} scanned.\n"
+                + $"Missing refresh: {extracted.MissingRefresh}, malformed: {extracted.Malformed}\n"
+                + $"Saved to:\n{save.FileName}";
+            StatusMessage = LastExportSummary;
+
+            var importNow = MessageBox.Show(
+                $"{LastExportSummary}\n\nImport into this batch now?",
+                "Extract complete",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Question);
+
+            if (importNow == MessageBoxResult.Yes)
+            {
+                _currentBatch = await _importService.ImportFileAsync(save.FileName, ImportDestination.ActiveOnly).ConfigureAwait(true);
+                await ReloadAccountsAsync().ConfigureAwait(true);
+                await ReloadPoolAccountsAsync().ConfigureAwait(true);
+                StatusMessage =
+                    $"Imported {_currentBatch.TotalRecords} extracted records into this batch. Click Start Processing to refresh.";
+                NotifyBatchCommands();
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(ex.Message, "Extract failed", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    [RelayCommand]
+    private async Task ImportTxtToPoolAsync()
+    {
+        var dialog = new OpenFileDialog
+        {
+            Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*"
+        };
+
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        try
+        {
             _currentBatch = await _importService.ImportFileAsync(dialog.FileName, ImportDestination.Pool).ConfigureAwait(true);
             await ReloadAccountsAsync().ConfigureAwait(true);
             await ReloadPoolAccountsAsync().ConfigureAwait(true);
-            StatusMessage = $"Imported {_currentBatch.TotalRecords} records from {Path.GetFileName(dialog.FileName)}. New accounts added to Pool.";
+            StatusMessage =
+                $"Imported {_currentBatch.TotalRecords} records from {Path.GetFileName(dialog.FileName)} into Pool. "
+                + "Accounts already in the pool stay refreshable on the Batch tab via Start Processing.";
+            PoolStatusMessage = StatusMessage;
+            NotifyBatchCommands();
+            NotifyPoolCommands();
         }
         catch (Exception ex)
         {
@@ -672,7 +823,68 @@ public partial class MainViewModel : ObservableObject
     }
 
     [RelayCommand(CanExecute = nameof(CanRunBatch))]
-    private Task ExportUsernamesAsync() => ExportResultsAsync(showMessage: true);
+    private async Task ExportUsernamesAsync()
+    {
+        if (_currentBatch == null)
+        {
+            return;
+        }
+
+        try
+        {
+            var path = await _exportService.ExportSuccessfulUsernamesAsync(_currentBatch.Id).ConfigureAwait(true);
+            var count = (await File.ReadAllLinesAsync(path).ConfigureAwait(true))
+                .Count(line => !string.IsNullOrWhiteSpace(line));
+            if (count == 0)
+            {
+                MessageBox.Show(
+                    "No usernames in the current batch (Provided Name / MC Username are empty).",
+                    "Nothing to export",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                return;
+            }
+
+            LastExportSummary = $"Exported {count} username(s) to:\n{path}";
+            MessageBox.Show(LastExportSummary, "Export complete", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(ex.Message, "Export failed", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    [RelayCommand(CanExecute = nameof(CanExportLibraryUsernames))]
+    private async Task ExportLibraryUsernamesAsync()
+    {
+        try
+        {
+            var path = await _exportService.ExportLibraryUsernamesAsync().ConfigureAwait(true);
+            LastExportSummary = $"Active library usernames exported to:\n{path}";
+            LibraryStatusMessage = LastExportSummary;
+            MessageBox.Show(LastExportSummary, "Export complete", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(ex.Message, "Export failed", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    [RelayCommand(CanExecute = nameof(CanExportPoolUsernames))]
+    private async Task ExportPoolUsernamesAsync()
+    {
+        try
+        {
+            var path = await _exportService.ExportPoolUsernamesAsync().ConfigureAwait(true);
+            LastExportSummary = $"Pool usernames exported to:\n{path}";
+            PoolStatusMessage = LastExportSummary;
+            MessageBox.Show(LastExportSummary, "Export complete", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(ex.Message, "Export failed", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
 
     [RelayCommand(CanExecute = nameof(CanRunBatch))]
     private async Task ExportAccessTokensAsync()
@@ -788,8 +1000,8 @@ public partial class MainViewModel : ObservableObject
         }
 
         await ReloadPoolAccountsAsync().ConfigureAwait(true);
+        PoolAutoManageEnabled = _settingsStore.Load().PoolAutoManageEnabled;
         StartPoolAutoManageTimer();
-        _ = RunPoolAutoManageAsync();
         await RefreshLocaltsStatusAsync().ConfigureAwait(true);
     }
 
@@ -817,6 +1029,7 @@ public partial class MainViewModel : ObservableObject
 
     private void StartPoolAutoManageTimer()
     {
+        _poolAutoManageTimer.Stop();
         var settings = _settingsStore.Load();
         if (!settings.PoolAutoManageEnabled)
         {
@@ -876,6 +1089,10 @@ public partial class MainViewModel : ObservableObject
 
     private bool CanExportPoolRefreshTokens() => PoolTotal > 0;
 
+    private bool CanExportPoolUsernames() => PoolTotal > 0;
+
+    private bool CanExportLibraryUsernames() => LibraryReadyCount > 0;
+
     private bool CanExportReadyTokens() => LibraryReadyCount > 0;
 
     private bool CanRefreshBatchAccount(AccountRowViewModel? row)
@@ -914,6 +1131,7 @@ public partial class MainViewModel : ObservableObject
         CancelPoolCommand.NotifyCanExecuteChanged();
         ExportPoolZipCommand.NotifyCanExecuteChanged();
         ExportPoolRefreshTokensCommand.NotifyCanExecuteChanged();
+        ExportPoolUsernamesCommand.NotifyCanExecuteChanged();
         ImportFromLocaltsCommand.NotifyCanExecuteChanged();
         StartProcessingCommand.NotifyCanExecuteChanged();
         RetryFailedCommand.NotifyCanExecuteChanged();
@@ -959,6 +1177,7 @@ public partial class MainViewModel : ObservableObject
     {
         LibraryReadyCount = LibraryAccounts.Count;
         LibraryAccountCount = LibraryReadyCount;
+        ExportLibraryUsernamesCommand.NotifyCanExecuteChanged();
 
         if (LibraryReadyCount == 0)
         {

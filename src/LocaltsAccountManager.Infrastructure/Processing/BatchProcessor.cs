@@ -96,8 +96,21 @@ public sealed class BatchProcessor : IBatchProcessor
             throw new InvalidOperationException("A batch is still running. Wait for it to finish or click Cancel first.");
         }
 
+        var recovered = await RecoverPoolLinkedFailuresAsync(batchId, cancellationToken).ConfigureAwait(false);
         var retryable = await _accountRepository.GetRetryEligibleAsync(batchId, cancellationToken).ConfigureAwait(false);
-        foreach (var account in retryable)
+        var byId = retryable.ToDictionary(a => a.Id);
+        foreach (var account in recovered)
+        {
+            byId[account.Id] = account;
+        }
+
+        if (byId.Count == 0)
+        {
+            throw new InvalidOperationException(
+                "No retryable failures. Re-import the TXT on Batch (Import TXT), then click Start Processing.");
+        }
+
+        foreach (var account in byId.Values)
         {
             account.ProcessingState = ProcessingState.Queued;
             account.BackoffUntil = null;
@@ -105,12 +118,74 @@ public sealed class BatchProcessor : IBatchProcessor
             account.ErrorCategory = ErrorCategory.None;
             account.FailureStage = FailureStage.None;
             account.OAuthErrorCode = null;
-            account.ServiceErrorDetail = null;
+            if (account.ServiceErrorDetail?.Contains("Already in pool", StringComparison.OrdinalIgnoreCase) == true
+                || account.ServiceErrorDetail?.Contains("Also in pool", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                account.ServiceErrorDetail = null;
+            }
+
+            account.IsErrorCauseConfirmed = false;
             _microsoftAccessCache.TryRemove(account.Id, out _);
             await _accountRepository.UpsertAsync(account, cancellationToken).ConfigureAwait(false);
         }
 
         await StartAsync(batchId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Old imports marked "Already in pool" as Failed without a usable batch credential.
+    /// Pull the refresh token from the pool account so Batch Start/Retry can refresh them.
+    /// </summary>
+    private async Task<List<AccountRecord>> RecoverPoolLinkedFailuresAsync(Guid batchId, CancellationToken cancellationToken)
+    {
+        var accounts = await _accountRepository.GetByBatchIdAsync(batchId, cancellationToken).ConfigureAwait(false);
+        var recovered = new List<AccountRecord>();
+        foreach (var account in accounts)
+        {
+            var looksLikePoolBlock =
+                account.ProcessingState is ProcessingState.Failed or ProcessingState.Malformed
+                && (account.ErrorCategory == ErrorCategory.MalformedInput
+                    || account.ServiceErrorDetail?.Contains("Already in pool", StringComparison.OrdinalIgnoreCase) == true
+                    || account.ServiceErrorDetail?.Contains("Also in pool", StringComparison.OrdinalIgnoreCase) == true
+                    || account.DuplicateOfRecordId.HasValue);
+
+            if (!looksLikePoolBlock)
+            {
+                continue;
+            }
+
+            AccountRecord? poolAccount = null;
+            if (account.DuplicateOfRecordId.HasValue)
+            {
+                poolAccount = await _accountRepository.GetByIdAsync(account.DuplicateOfRecordId.Value, cancellationToken)
+                    .ConfigureAwait(false);
+                if (poolAccount is not null && poolAccount.BatchId == account.BatchId)
+                {
+                    poolAccount = null; // in-batch duplicate, not pool
+                }
+            }
+
+            if (poolAccount is null && !string.IsNullOrWhiteSpace(account.TokenFingerprint))
+            {
+                poolAccount = await _accountRepository.GetPoolAccountByFingerprintAsync(account.TokenFingerprint, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            if (poolAccount is null || string.IsNullOrWhiteSpace(poolAccount.CredentialReference))
+            {
+                continue;
+            }
+
+            account.CredentialReference = poolAccount.CredentialReference;
+            account.DuplicateOfRecordId = null;
+            account.ParseStatus = ParseStatus.Parsed;
+            account.ProvidedUsername ??= poolAccount.ProvidedUsername;
+            account.AuthenticatedMinecraftUsername ??= poolAccount.AuthenticatedMinecraftUsername;
+            account.AuthenticatedMinecraftUuid ??= poolAccount.AuthenticatedMinecraftUuid;
+            recovered.Add(account);
+        }
+
+        return recovered;
     }
 
     public Task RefreshAccountAsync(Guid batchId, Guid accountId, CancellationToken cancellationToken = default)
@@ -192,6 +267,23 @@ public sealed class BatchProcessor : IBatchProcessor
             await _batchRepository.UpsertAsync(batch, cancellationToken).ConfigureAwait(false);
 
             var accounts = await _accountRepository.GetByBatchIdAsync(batchId, cancellationToken).ConfigureAwait(false);
+
+            // Fix leftover "Already in pool" Failed rows so Start Processing works without re-import.
+            var recovered = await RecoverPoolLinkedFailuresAsync(batchId, cancellationToken).ConfigureAwait(false);
+            foreach (var account in recovered)
+            {
+                account.ProcessingState = ProcessingState.Queued;
+                account.BackoffUntil = null;
+                account.RetryCount = 0;
+                account.ErrorCategory = ErrorCategory.None;
+                account.FailureStage = FailureStage.None;
+                account.ServiceErrorDetail = null;
+                account.IsErrorCauseConfirmed = false;
+                _microsoftAccessCache.TryRemove(account.Id, out _);
+                await _accountRepository.UpsertAsync(account, cancellationToken).ConfigureAwait(false);
+            }
+
+            accounts = await _accountRepository.GetByBatchIdAsync(batchId, cancellationToken).ConfigureAwait(false);
             foreach (var account in accounts.Where(NeedsAccessTokenRefresh))
             {
                 account.ProcessingState = ProcessingState.Queued;
@@ -221,13 +313,19 @@ public sealed class BatchProcessor : IBatchProcessor
 
                     if (account.DuplicateOfRecordId.HasValue)
                     {
-                        account.ProcessingState = ProcessingState.Failed;
-                        account.FailureStage = FailureStage.Parse;
-                        account.ErrorCategory = ErrorCategory.MalformedInput;
-                        account.ServiceErrorDetail = $"Possible duplicate of record {account.DuplicateOfRecordId.Value}.";
-                        account.IsErrorCauseConfirmed = true;
-                        await PersistAccountAndUpdateBatchAsync(batch, account, cancellationToken).ConfigureAwait(false);
-                        continue;
+                        var original = await _accountRepository.GetByIdAsync(account.DuplicateOfRecordId.Value, cancellationToken)
+                            .ConfigureAwait(false);
+                        // Only skip true in-batch duplicates. Pool overlaps are allowed to refresh here.
+                        if (original is not null && original.BatchId == account.BatchId)
+                        {
+                            account.ProcessingState = ProcessingState.Failed;
+                            account.FailureStage = FailureStage.Parse;
+                            account.ErrorCategory = ErrorCategory.MalformedInput;
+                            account.ServiceErrorDetail = $"Possible duplicate of record {account.DuplicateOfRecordId.Value}.";
+                            account.IsErrorCauseConfirmed = true;
+                            await PersistAccountAndUpdateBatchAsync(batch, account, cancellationToken).ConfigureAwait(false);
+                            continue;
+                        }
                     }
 
                     workers.Add(ProcessAccountAsync(batch, account, queue, cancellationToken));

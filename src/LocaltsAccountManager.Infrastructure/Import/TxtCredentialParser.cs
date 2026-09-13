@@ -7,7 +7,7 @@ namespace LocaltsAccountManager.Infrastructure.Import;
 
 public sealed class TxtCredentialParser : ITxtCredentialParser
 {
-    private const int MaxLineLength = 65536;
+    private const int MaxLineLength = CappedLineReader.MaxLineLength;
     private readonly ICredentialFingerprinter _fingerprinter;
 
     public TxtCredentialParser(ICredentialFingerprinter fingerprinter)
@@ -17,13 +17,14 @@ public sealed class TxtCredentialParser : ITxtCredentialParser
 
     public IReadOnlyList<ParsedCredentialLine> ParseFile(string filePath, Stream content)
     {
+        ArgumentNullException.ThrowIfNull(content);
+
         using var reader = new StreamReader(content, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, leaveOpen: true);
         var results = new List<ParsedCredentialLine>();
         var lineNumber = 0;
 
-        while (!reader.EndOfStream)
+        while (CappedLineReader.ReadLine(reader, MaxLineLength, out _) is { } line)
         {
-            var line = reader.ReadLine() ?? string.Empty;
             lineNumber++;
             results.Add(ParseLine(lineNumber, line));
         }
@@ -33,6 +34,17 @@ public sealed class TxtCredentialParser : ITxtCredentialParser
 
     public ParsedCredentialLine ParseLine(int lineNumber, string line)
     {
+        if (string.IsNullOrEmpty(line))
+        {
+            return new ParsedCredentialLine
+            {
+                LineNumber = lineNumber,
+                OriginalLine = string.Empty,
+                ParseStatus = ParseStatus.SkippedBlank,
+                InputForm = OriginalInputForm.Unknown
+            };
+        }
+
         if (line.Length > MaxLineLength)
         {
             return new ParsedCredentialLine
@@ -57,6 +69,37 @@ public sealed class TxtCredentialParser : ITxtCredentialParser
             };
         }
 
+        if (trimmed.StartsWith("===", StringComparison.Ordinal)
+            || trimmed.StartsWith("#", StringComparison.Ordinal))
+        {
+            return new ParsedCredentialLine
+            {
+                LineNumber = lineNumber,
+                OriginalLine = line,
+                ParseStatus = ParseStatus.SkippedBlank,
+                InputForm = OriginalInputForm.Unknown
+            };
+        }
+
+        // Dump lines: email:pass | … | MCTOKEN: … | REFRESHTOKEN: M.C…
+        // Prefer the MSA refresh token; ignore password / MC JWT when present.
+        if (trimmed.Contains("REFRESHTOKEN", StringComparison.OrdinalIgnoreCase)
+            || trimmed.Contains("MCTOKEN", StringComparison.OrdinalIgnoreCase))
+        {
+            if (RefreshTokenLineExtractor.TryExtract(trimmed, out var dumpUser, out var dumpRefresh, out var reason))
+            {
+                return Parsed(lineNumber, line, OriginalInputForm.UsernameToken, dumpUser, dumpRefresh);
+            }
+
+            return Malformed(
+                lineNumber,
+                line,
+                OriginalInputForm.UsernameToken,
+                reason == "missing"
+                    ? "Dump line has no MSA refresh token (REFRESHTOKEN empty)."
+                    : "Dump line did not contain a usable MSA refresh token.");
+        }
+
         var colonIndex = trimmed.IndexOf(':');
         if (colonIndex >= 0)
         {
@@ -73,6 +116,10 @@ public sealed class TxtCredentialParser : ITxtCredentialParser
                 return Malformed(lineNumber, line, OriginalInputForm.UsernameToken, "Missing credential after delimiter.");
             }
 
+            // Split on the first colon only, preserving any colons inside the token
+            // (e.g. "user:part1:part2"). Dump lines carrying explicit REFRESHTOKEN:/MCTOKEN:
+            // fields are handled above; here we keep the general username:token contract so
+            // vendor-specific token blobs still import. Invalid tokens surface later at auth.
             return Parsed(lineNumber, line, OriginalInputForm.UsernameToken, username, token);
         }
 

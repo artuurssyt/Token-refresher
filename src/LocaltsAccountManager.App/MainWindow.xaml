@@ -27,7 +27,10 @@
                     </Grid.RowDefinitions>
 
                     <WrapPanel Grid.Row="0" Margin="0,0,0,8">
-                        <Button Content="Import TXT" Command="{Binding ImportTxtCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Import TXT" Command="{Binding ImportTxtCommand}" Margin="0,0,8,8"
+                                ToolTip="Import credentials into this batch only — not added to Pool. Then Start Processing. Dump lines with REFRESHTOKEN: M.C… are accepted."/>
+                        <Button Content="Extract MSA Refresh Tokens" Command="{Binding ExtractMsaRefreshTokensCommand}" Margin="0,0,8,8"
+                                ToolTip="From dump lines (email:pass | … | REFRESHTOKEN: M.C…), write clean username:refresh lines for import."/>
                         <Button Content="Start Processing" Command="{Binding StartProcessingCommand}" Margin="0,0,8,8"/>
                         <Button Content="Cancel" Command="{Binding CancelProcessingCommand}" Margin="0,0,8,8"/>
                         <Button Content="Retry Failed" Command="{Binding RetryFailedCommand}" Margin="0,0,8,8"/>
@@ -101,6 +104,8 @@
                     <WrapPanel Grid.Row="0" Margin="0,0,0,8">
                         <Button Content="Import from Localts" Command="{Binding ImportFromLocaltsCommand}" Margin="0,0,8,8"
                                 ToolTip="Fetch all packaged orders from your Localts account and add them to the pool"/>
+                        <Button Content="Import TXT to Pool" Command="{Binding ImportTxtToPoolCommand}" Margin="0,0,8,8"
+                                ToolTip="Import a credential TXT into the pool (and current batch for viewing)"/>
                         <Button Content="Refresh Pool" Command="{Binding RefreshPoolCommand}" Margin="0,0,8,8"
                                 ToolTip="Refresh every account in the pool"/>
                         <Button Content="Cancel" Command="{Binding CancelPoolCommand}" Margin="0,0,8,8"/>
@@ -108,9 +113,16 @@
                                 ToolTip="Export ready Minecraft access tokens — one .txt per username in a ZIP"/>
                         <Button Content="Export Pool Refresh Tokens" Command="{Binding ExportPoolRefreshTokensCommand}" Margin="0,0,8,8"
                                 ToolTip="Export Microsoft OAuth refresh tokens (username:token) for all pool accounts"/>
+                        <Button Content="Export Pool Usernames" Command="{Binding ExportPoolUsernamesCommand}" Margin="0,0,8,8"
+                                ToolTip="Export Minecraft usernames for every account in the pool"/>
                         <Button Content="Export Meteor SESSION" Command="{Binding Donut.ExportMeteorSessionsCommand}" Margin="0,0,8,8"
                                 ToolTip="Minecraft access JWTs (~24h). In artuurssclient: Accounts → Session — not Refresh Token."/>
                         <Button Content="Reload list" Command="{Binding ReloadPoolListCommand}" Margin="0,0,8,8"/>
+                        <CheckBox Content="Auto-refresh pool in background"
+                                  IsChecked="{Binding PoolAutoManageEnabled}"
+                                  VerticalAlignment="Center"
+                                  Margin="0,0,8,8"
+                                  ToolTip="Off by default. When on, refreshes expiring tokens on a timer — never automatically when you open the app."/>
                     </WrapPanel>
 
                     <Grid Grid.Row="1" Margin="0,0,0,8">
@@ -190,7 +202,8 @@
                                     ToolTip="Minecraft access JWTs (~24h). In artuurssclient: Accounts → Session — not Refresh Token."/>
                             <Button Content="Export ZIP" Command="{Binding ExportAccessTokensZipCommand}" Margin="0,0,8,0"
                                     ToolTip="Export all tokens ready now — one .txt per username. Safe to use while batch is still running."/>
-                            <Button Content="Export Usernames" Command="{Binding ExportUsernamesCommand}" Margin="0,0,8,0"/>
+                            <Button Content="Export Usernames" Command="{Binding ExportLibraryUsernamesCommand}" Margin="0,0,8,0"
+                                    ToolTip="Export Minecraft usernames from active Accounts"/>
                             <Button Content="Refresh list" Command="{Binding RefreshLibraryCommand}"/>
                         </StackPanel>
                     </Grid>

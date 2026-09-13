@@ -123,6 +123,15 @@ public sealed class AppSettingsStore : IAppSettingsStore
             dirty = true;
         }
 
+        // Older builds defaulted this on and refreshed the pool on every launch.
+        // Force opt-in once so opening the app only loads data.
+        if (settings.PoolAutoManageEnabled && !settings.PoolAutoManageOptInAcknowledged)
+        {
+            settings.PoolAutoManageEnabled = false;
+            settings.PoolAutoManageOptInAcknowledged = true;
+            dirty = true;
+        }
+
         if (dirty)
         {
             Save(settings);

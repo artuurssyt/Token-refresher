@@ -112,8 +112,11 @@ public sealed class AppSettings
     public bool EnablePublicProfileLookup { get; set; } = true;
     public int ProfileLookupRateLimitPerMinute { get; set; } = 300;
 
-    /// <summary>When enabled, the pool auto-refreshes accounts before tokens expire.</summary>
-    public bool PoolAutoManageEnabled { get; set; } = true;
+    /// <summary>When enabled, the pool periodically auto-refreshes accounts before tokens expire. Off by default — use Refresh Pool manually.</summary>
+    public bool PoolAutoManageEnabled { get; set; } = false;
+
+    /// <summary>Set after migrating away from the old always-on auto-refresh default.</summary>
+    public bool PoolAutoManageOptInAcknowledged { get; set; }
 
     /// <summary>How often the pool checks for accounts needing refresh.</summary>
     public int PoolAutoRefreshIntervalMinutes { get; set; } = 30;

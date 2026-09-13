@@ -33,9 +33,12 @@ public sealed class ExportService : IExportService
         var batch = await RequireBatchAsync(batchId, cancellationToken).ConfigureAwait(false);
         var accounts = await _accountRepository.GetByBatchIdAsync(batchId, cancellationToken).ConfigureAwait(false);
         var settings = _settingsStore.Load();
+        // Prefer authenticated MC name when present; otherwise export the provided/import name
+        // so the Batch list can be dumped without running a refresh.
         var usernames = accounts
-            .Where(a => a.ProcessingState == ProcessingState.Succeeded && !string.IsNullOrWhiteSpace(a.AuthenticatedMinecraftUsername))
-            .Select(a => a.AuthenticatedMinecraftUsername!)
+            .Select(ResolveUsername)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Select(name => name!)
             .ToList();
 
         if (settings.ExportUniqueUsernamesOnly)
@@ -47,6 +50,56 @@ public sealed class ExportService : IExportService
         await File.WriteAllLinesAsync(path, usernames, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
         return path;
     }
+
+    public async Task<string> ExportLibraryUsernamesAsync(string? outputDirectory = null, CancellationToken cancellationToken = default)
+    {
+        var accounts = await _accountRepository.GetAllActiveWithStoredAccessTokensAsync(cancellationToken).ConfigureAwait(false);
+        return await WriteUsernameListAsync(accounts, "library_usernames", outputDirectory, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async Task<string> ExportPoolUsernamesAsync(string? outputDirectory = null, CancellationToken cancellationToken = default)
+    {
+        var accounts = await _accountRepository.GetPoolAccountsAsync(cancellationToken).ConfigureAwait(false);
+        return await WriteUsernameListAsync(accounts, "pool_usernames", outputDirectory, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<string> WriteUsernameListAsync(
+        IReadOnlyList<AccountRecord> accounts,
+        string filePrefix,
+        string? outputDirectory,
+        CancellationToken cancellationToken)
+    {
+        var settings = _settingsStore.Load();
+        var usernames = accounts
+            .Select(ResolveUsername)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Select(name => name!)
+            .ToList();
+
+        if (settings.ExportUniqueUsernamesOnly)
+        {
+            usernames = usernames.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        }
+
+        if (usernames.Count == 0)
+        {
+            throw new InvalidOperationException(
+                "No usernames to export. Refresh accounts first so Minecraft usernames are filled in.");
+        }
+
+        var outDir = ResolveLibraryOutputDirectory(_settingsStore, outputDirectory);
+        Directory.CreateDirectory(outDir);
+        var path = Path.Combine(outDir, $"{filePrefix}_{usernames.Count}_{DateTime.Now:yyyyMMdd_HHmmss}.txt");
+        await File.WriteAllLinesAsync(path, usernames, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
+        return path;
+    }
+
+    private static string? ResolveUsername(AccountRecord account) =>
+        !string.IsNullOrWhiteSpace(account.AuthenticatedMinecraftUsername)
+            ? account.AuthenticatedMinecraftUsername
+            : account.ProvidedUsername;
 
     public async Task<string> ExportSuccessfulMinecraftAccessTokensAsync(Guid batchId, string? outputDirectory = null, CancellationToken cancellationToken = default)
     {

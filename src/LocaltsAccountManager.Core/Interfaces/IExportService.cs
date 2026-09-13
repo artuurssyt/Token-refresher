@@ -3,6 +3,8 @@ namespace LocaltsAccountManager.Core.Interfaces;
 public interface IExportService
 {
     Task<string> ExportSuccessfulUsernamesAsync(Guid batchId, string? outputDirectory = null, CancellationToken cancellationToken = default);
+    Task<string> ExportLibraryUsernamesAsync(string? outputDirectory = null, CancellationToken cancellationToken = default);
+    Task<string> ExportPoolUsernamesAsync(string? outputDirectory = null, CancellationToken cancellationToken = default);
     Task<string> ExportErrorsAsync(Guid batchId, string? outputDirectory = null, CancellationToken cancellationToken = default);
     Task<string> ExportDetailedResultsAsync(Guid batchId, string? outputDirectory = null, CancellationToken cancellationToken = default);
     Task<string> ExportFailedOriginalRecordsAsync(Guid batchId, string? outputDirectory = null, CancellationToken cancellationToken = default);
