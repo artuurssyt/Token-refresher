@@ -21,7 +21,11 @@ public sealed class PoolProcessor : IPoolProcessor
     private readonly RetryPolicy _retryPolicy;
     private readonly ThrottleCoordinator _throttleCoordinator;
     private readonly SecretSafeLogger _logger;
+    private readonly ProcessingArbiter _arbiter;
     private readonly ConcurrentDictionary<Guid, CachedMicrosoftAccess> _microsoftAccessCache = new();
+
+    /// <summary>Longest the coordinator loop idles before re-checking backoff and rate-limit state.</summary>
+    private static readonly TimeSpan MaxIdlePoll = TimeSpan.FromSeconds(5);
 
     private CancellationTokenSource? _runCts;
     private Task? _runTask;
@@ -39,7 +43,8 @@ public sealed class PoolProcessor : IPoolProcessor
         IAppSettingsStore settingsStore,
         RetryPolicy retryPolicy,
         ThrottleCoordinator throttleCoordinator,
-        SecretSafeLogger logger)
+        SecretSafeLogger logger,
+        ProcessingArbiter arbiter)
     {
         _accountRepository = accountRepository;
         _batchProcessor = batchProcessor;
@@ -51,62 +56,87 @@ public sealed class PoolProcessor : IPoolProcessor
         _retryPolicy = retryPolicy;
         _throttleCoordinator = throttleCoordinator;
         _logger = logger;
+        _arbiter = arbiter;
     }
 
     public event EventHandler<PoolProgressEventArgs>? ProgressChanged;
 
-    public bool IsRunning => _runTask is { IsCompleted: false };
+    public bool IsRunning => _arbiter.IsHeldBy(ProcessingArbiter.PoolOwner);
 
     public Task RefreshPoolAsync(CancellationToken cancellationToken = default)
     {
-        EnsureCanStart();
-        _runCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        _runTask = RunPoolAsync(refreshAll: true, _runCts.Token);
-        return _runTask;
+        if (!_arbiter.TryAcquire(ProcessingArbiter.PoolOwner))
+        {
+            throw new InvalidOperationException(
+                _arbiter.IsHeldBy(ProcessingArbiter.BatchOwner)
+                    ? "A batch is running. Wait for it to finish before refreshing the pool."
+                    : "Pool refresh is already running.");
+        }
+
+        return StartClaimedRun(refreshAll: true, cancellationToken);
     }
 
     public Task AutoManageAsync(CancellationToken cancellationToken = default)
     {
-        if (IsRunning || _batchProcessor.IsRunning)
+        // Background timer path: silently skip when a batch or another pool run owns the slot.
+        if (!_arbiter.TryAcquire(ProcessingArbiter.PoolOwner))
         {
             return Task.CompletedTask;
         }
 
-        _runCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        _runTask = RunPoolAsync(refreshAll: false, _runCts.Token);
-        return _runTask;
+        return StartClaimedRun(refreshAll: false, cancellationToken);
+    }
+
+    private Task StartClaimedRun(bool refreshAll, CancellationToken cancellationToken)
+    {
+        try
+        {
+            _runCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _runTask = RunPoolAsync(refreshAll, _runCts.Token);
+            return _runTask;
+        }
+        catch
+        {
+            ReleaseRunSlot();
+            throw;
+        }
+    }
+
+    private void ReleaseRunSlot()
+    {
+        var cts = _runCts;
+        _runCts = null;
+        cts?.Dispose();
+        _arbiter.Release(ProcessingArbiter.PoolOwner);
     }
 
     public async Task CancelAsync()
     {
-        if (_runCts == null)
-        {
-            return;
-        }
+        // Snapshot both fields: the run's finally can null and dispose them at any moment.
+        var cts = _runCts;
+        var task = _runTask;
 
-        await _runCts.CancelAsync().ConfigureAwait(false);
-        if (_runTask != null)
+        if (cts != null)
         {
             try
             {
-                await _runTask.ConfigureAwait(false);
+                await cts.CancelAsync().ConfigureAwait(false);
+            }
+            catch (ObjectDisposedException)
+            {
+                // The run finished and disposed its token source before we got here.
+            }
+        }
+
+        if (task != null)
+        {
+            try
+            {
+                await task.ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
             }
-        }
-    }
-
-    private void EnsureCanStart()
-    {
-        if (IsRunning)
-        {
-            throw new InvalidOperationException("Pool refresh is already running.");
-        }
-
-        if (_batchProcessor.IsRunning)
-        {
-            throw new InvalidOperationException("A batch is running. Wait for it to finish before refreshing the pool.");
         }
     }
 
@@ -135,45 +165,142 @@ public sealed class PoolProcessor : IPoolProcessor
                 await _accountRepository.UpsertAsync(account, cancellationToken).ConfigureAwait(false);
             }
 
-            var queue = new Queue<AccountRecord>(toProcess);
+            // Workers re-enqueue their own account on retryable failures, so the queue is written
+            // from several threads at once and must be concurrent.
+            var queue = new ConcurrentQueue<AccountRecord>(toProcess);
             var workers = new List<Task>();
 
-            while (queue.Count > 0 || workers.Count > 0)
+            try
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                await _throttleCoordinator.WaitForGlobalLimitAsync(cancellationToken).ConfigureAwait(false);
-
-                workers.RemoveAll(w => w.IsCompleted);
-                while (queue.Count > 0 && workers.Count < _throttleCoordinator.EffectiveConcurrency)
+                while (!queue.IsEmpty || workers.Count > 0)
                 {
-                    var account = queue.Dequeue();
-                    if (account.BackoffUntil.HasValue && account.BackoffUntil.Value > DateTimeOffset.UtcNow)
+                    cancellationToken.ThrowIfCancellationRequested();
+                    await _throttleCoordinator.WaitForGlobalLimitAsync(cancellationToken).ConfigureAwait(false);
+
+                    HarvestCompletedWorkers(workers);
+                    var dispatched = 0;
+                    while (workers.Count < _throttleCoordinator.EffectiveConcurrency && queue.TryDequeue(out var account))
                     {
-                        queue.Enqueue(account);
-                        break;
+                        if (account.BackoffUntil.HasValue && account.BackoffUntil.Value > DateTimeOffset.UtcNow)
+                        {
+                            // Rotate to the tail so ready accounts behind it still get a turn.
+                            queue.Enqueue(account);
+                            break;
+                        }
+
+                        workers.Add(ProcessAccountAsync(account, queue, cancellationToken));
+                        dispatched++;
                     }
 
-                    workers.Add(ProcessAccountAsync(account, queue, cancellationToken));
-                }
-
-                if (workers.Count == 0 && queue.Count > 0)
-                {
-                    await Task.Delay(500, cancellationToken).ConfigureAwait(false);
-                }
-                else if (workers.Count > 0)
-                {
-                    await Task.WhenAny(workers).ConfigureAwait(false);
+                    if (workers.Count > 0)
+                    {
+                        await Task.WhenAny(workers).ConfigureAwait(false);
+                    }
+                    else if (!queue.IsEmpty && dispatched == 0)
+                    {
+                        await Task.Delay(ComputeIdleDelay(queue), cancellationToken).ConfigureAwait(false);
+                    }
                 }
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // Fall through and report the final pool state below.
+            }
+            finally
+            {
+                // In-flight workers hold the linked token; let them observe cancellation and finish
+                // before ReleaseRunSlot disposes the source underneath them.
+                await DrainWorkersAsync(workers).ConfigureAwait(false);
+            }
 
-            var remaining = await _accountRepository.GetPoolAccountsAsync(cancellationToken).ConfigureAwait(false);
+            var remaining = await _accountRepository.GetPoolAccountsAsync(CancellationToken.None).ConfigureAwait(false);
             RaiseProgress(remaining, null);
         }
         finally
         {
-            _runCts?.Dispose();
-            _runCts = null;
+            ReleaseRunSlot();
         }
+    }
+
+    /// <summary>
+    /// Drops finished workers from the tracking list, touching <see cref="Task.Exception"/> so a
+    /// fault that escaped <see cref="ProcessAccountAsync"/> is observed and logged rather than
+    /// silently discarded.
+    /// </summary>
+    private void HarvestCompletedWorkers(List<Task> workers)
+    {
+        for (var i = workers.Count - 1; i >= 0; i--)
+        {
+            var worker = workers[i];
+            if (!worker.IsCompleted)
+            {
+                continue;
+            }
+
+            workers.RemoveAt(i);
+            if (worker.IsFaulted && worker.Exception is { } error)
+            {
+                _logger.LogInfo($"Pool worker faulted: {error.GetBaseException().GetType().Name}");
+            }
+        }
+    }
+
+    private async Task DrainWorkersAsync(List<Task> workers)
+    {
+        if (workers.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await Task.WhenAll(workers).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            _logger.LogInfo($"Pool worker faulted while draining: {ex.GetType().Name}");
+        }
+        finally
+        {
+            workers.Clear();
+        }
+    }
+
+    /// <summary>
+    /// How long the coordinator may idle when nothing could be dispatched. Returns zero if any
+    /// queued account is already due (the head may be in backoff while a later one is ready),
+    /// otherwise the wait until the soonest backoff expires, capped so the loop keeps re-checking
+    /// the global rate limit and cancellation.
+    /// </summary>
+    private static TimeSpan ComputeIdleDelay(ConcurrentQueue<AccountRecord> queue)
+    {
+        var now = DateTimeOffset.UtcNow;
+        TimeSpan? soonest = null;
+
+        foreach (var account in queue)
+        {
+            var until = account.BackoffUntil;
+            if (!until.HasValue || until.Value <= now)
+            {
+                return TimeSpan.Zero;
+            }
+
+            var wait = until.Value - now;
+            if (soonest is null || wait < soonest.Value)
+            {
+                soonest = wait;
+            }
+        }
+
+        if (soonest is not { } delay)
+        {
+            return TimeSpan.Zero;
+        }
+
+        return delay < MaxIdlePoll ? delay : MaxIdlePoll;
     }
 
     private static bool NeedsAutoRefresh(AccountRecord account, AppSettings settings)
@@ -220,7 +347,7 @@ public sealed class PoolProcessor : IPoolProcessor
 
     private async Task ProcessAccountAsync(
         AccountRecord account,
-        Queue<AccountRecord> queue,
+        ConcurrentQueue<AccountRecord> queue,
         CancellationToken cancellationToken)
     {
         try
@@ -240,13 +367,29 @@ public sealed class PoolProcessor : IPoolProcessor
             var credential = await _credentialStore.RetrieveAsync(account.CredentialReference, cancellationToken).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(credential))
             {
-                await RemoveFromPoolAsync(account, cancellationToken).ConfigureAwait(false);
+                // Keep the row: the blob may be unreadable for a fixable reason (different Windows
+                // user or machine), and deleting it would destroy the only copy of the token.
+                await MarkPoolFailureAsync(
+                    account,
+                    ProcessingState.ReauthenticationRequired,
+                    ErrorCategory.MissingCredential,
+                    FailureStage.Authentication,
+                    "Stored credential could not be read from secure storage (DPAPI).",
+                    cancellationToken).ConfigureAwait(false);
                 return;
             }
 
             if (!_microsoftAuthAdapter.IsConfigured || !_minecraftIdentityAdapter.IsConfigured)
             {
-                await RemoveFromPoolAsync(account, cancellationToken).ConfigureAwait(false);
+                // A missing or unverified authentication_profile.json is a configuration problem,
+                // never a reason to delete pool accounts and their refresh tokens.
+                await MarkPoolFailureAsync(
+                    account,
+                    ProcessingState.Failed,
+                    ErrorCategory.ConfigurationRequired,
+                    FailureStage.Authentication,
+                    "Authentication profile is not verified. Configure authentication_profile.json.",
+                    cancellationToken).ConfigureAwait(false);
                 return;
             }
 
@@ -269,7 +412,13 @@ public sealed class PoolProcessor : IPoolProcessor
 
                 if (string.IsNullOrWhiteSpace(msResult.MicrosoftAccessToken))
                 {
-                    await RemoveFromPoolAsync(account, cancellationToken).ConfigureAwait(false);
+                    await MarkPoolFailureAsync(
+                        account,
+                        ProcessingState.Failed,
+                        ErrorCategory.MicrosoftServiceError,
+                        FailureStage.Authentication,
+                        "Microsoft authentication succeeded but returned no access token.",
+                        cancellationToken).ConfigureAwait(false);
                     return;
                 }
 
@@ -327,16 +476,48 @@ public sealed class PoolProcessor : IPoolProcessor
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            // Persist with None: the token is already cancelled, so passing it here meant the
+            // Cancelled state never reached the database.
             account.ProcessingState = ProcessingState.Cancelled;
             account.ErrorCategory = ErrorCategory.Cancelled;
-            await _accountRepository.UpsertAsync(account, cancellationToken).ConfigureAwait(false);
-            RaiseProgress(await _accountRepository.GetPoolAccountsAsync(cancellationToken).ConfigureAwait(false), account);
+            await _accountRepository.UpsertAsync(account, CancellationToken.None).ConfigureAwait(false);
+            RaiseProgress(await _accountRepository.GetPoolAccountsAsync(CancellationToken.None).ConfigureAwait(false), account);
         }
         catch (Exception ex)
         {
+            // An unexpected fault (DB hiccup, DPAPI error, bad JSON) says nothing about the
+            // validity of the refresh token, so record it and keep the account.
             _logger.LogInfo($"Unexpected pool error for record {account.Id}: {ex.GetType().Name}");
-            await RemoveFromPoolAsync(account, cancellationToken).ConfigureAwait(false);
+            await MarkPoolFailureAsync(
+                account,
+                ProcessingState.Failed,
+                ErrorCategory.Unknown,
+                FailureStage.Authentication,
+                ex.Message,
+                CancellationToken.None).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Records a failure against a pool account without deleting it or its stored credential.
+    /// </summary>
+    private async Task MarkPoolFailureAsync(
+        AccountRecord account,
+        ProcessingState state,
+        ErrorCategory category,
+        FailureStage stage,
+        string detail,
+        CancellationToken cancellationToken)
+    {
+        account.ProcessingState = state;
+        account.ErrorCategory = category;
+        account.FailureStage = stage;
+        account.ServiceErrorDetail = detail;
+        account.BackoffUntil = null;
+        _microsoftAccessCache.TryRemove(account.Id, out _);
+
+        await _accountRepository.UpsertAsync(account, cancellationToken).ConfigureAwait(false);
+        RaiseProgress(await _accountRepository.GetPoolAccountsAsync(cancellationToken).ConfigureAwait(false), account);
     }
 
     private async Task EnrichProfileAsync(AccountRecord account, CancellationToken cancellationToken)
@@ -366,7 +547,7 @@ public sealed class PoolProcessor : IPoolProcessor
     private async Task HandleAuthFailureAsync(
         AccountRecord account,
         AuthenticationResult result,
-        Queue<AccountRecord> queue,
+        ConcurrentQueue<AccountRecord> queue,
         CancellationToken cancellationToken)
     {
         account.FailureStage = result.FailureStage;

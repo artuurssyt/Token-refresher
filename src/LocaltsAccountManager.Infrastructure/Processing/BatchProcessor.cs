@@ -4,7 +4,6 @@ using LocaltsAccountManager.Core.Interfaces;
 using LocaltsAccountManager.Core.Models;
 using LocaltsAccountManager.Infrastructure.Diagnostics;
 using LocaltsAccountManager.Infrastructure.Minecraft;
-using Microsoft.Extensions.DependencyInjection;
 
 namespace LocaltsAccountManager.Infrastructure.Processing;
 
@@ -19,8 +18,11 @@ public sealed class BatchProcessor : IBatchProcessor
     private readonly RetryPolicy _retryPolicy;
     private readonly ThrottleCoordinator _throttleCoordinator;
     private readonly SecretSafeLogger _logger;
-    private readonly IServiceProvider _serviceProvider;
+    private readonly ProcessingArbiter _arbiter;
     private readonly ConcurrentDictionary<Guid, CachedMicrosoftAccess> _microsoftAccessCache = new();
+
+    /// <summary>Longest the coordinator loop idles before re-checking backoff and rate-limit state.</summary>
+    private static readonly TimeSpan MaxIdlePoll = TimeSpan.FromSeconds(5);
 
     private CancellationTokenSource? _runCts;
     private Task? _runTask;
@@ -37,7 +39,7 @@ public sealed class BatchProcessor : IBatchProcessor
         RetryPolicy retryPolicy,
         ThrottleCoordinator throttleCoordinator,
         SecretSafeLogger logger,
-        IServiceProvider serviceProvider)
+        ProcessingArbiter arbiter)
     {
         _accountRepository = accountRepository;
         _batchRepository = batchRepository;
@@ -48,39 +50,42 @@ public sealed class BatchProcessor : IBatchProcessor
         _retryPolicy = retryPolicy;
         _throttleCoordinator = throttleCoordinator;
         _logger = logger;
-        _serviceProvider = serviceProvider;
+        _arbiter = arbiter;
     }
 
     public event EventHandler<BatchProgressEventArgs>? ProgressChanged;
 
-    public bool IsRunning => _runTask is { IsCompleted: false };
+    public bool IsRunning => _arbiter.IsHeldBy(ProcessingArbiter.BatchOwner);
 
     public Task StartAsync(Guid batchId, CancellationToken cancellationToken = default)
     {
-        EnsurePoolNotRunning();
-        if (IsRunning)
-        {
-            throw new InvalidOperationException("A batch is already running.");
-        }
-
-        _runCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        _runTask = RunBatchAsync(batchId, _runCts.Token);
-        return _runTask;
+        AcquireRunSlot();
+        return StartClaimedRun(batchId, cancellationToken);
     }
 
     public async Task CancelAsync()
     {
-        if (_runCts == null)
-        {
-            return;
-        }
+        // Snapshot both fields: the run's finally can null and dispose them at any moment.
+        var cts = _runCts;
+        var task = _runTask;
 
-        await _runCts.CancelAsync().ConfigureAwait(false);
-        if (_runTask != null)
+        if (cts != null)
         {
             try
             {
-                await _runTask.ConfigureAwait(false);
+                await cts.CancelAsync().ConfigureAwait(false);
+            }
+            catch (ObjectDisposedException)
+            {
+                // The run finished and disposed its token source before we got here.
+            }
+        }
+
+        if (task != null)
+        {
+            try
+            {
+                await task.ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -90,27 +95,41 @@ public sealed class BatchProcessor : IBatchProcessor
 
     public async Task RetryFailedAsync(Guid batchId, CancellationToken cancellationToken = default)
     {
-        EnsurePoolNotRunning();
-        if (IsRunning)
+        // Hold the run slot across the prep writes too, otherwise the pool could start
+        // mutating the same rows between the requeue pass and the actual run.
+        AcquireRunSlot();
+
+        Dictionary<Guid, AccountRecord> byId;
+        try
         {
-            throw new InvalidOperationException("A batch is still running. Wait for it to finish or click Cancel first.");
+            var recovered = await RecoverPoolLinkedFailuresAsync(batchId, cancellationToken).ConfigureAwait(false);
+            var retryable = await _accountRepository.GetRetryEligibleAsync(batchId, cancellationToken).ConfigureAwait(false);
+            byId = retryable.ToDictionary(a => a.Id);
+            foreach (var account in recovered)
+            {
+                byId[account.Id] = account;
+            }
+
+            if (byId.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "No retryable failures. Re-import the TXT on Batch (Import TXT), then click Start Processing.");
+            }
+
+            await RequeueForRetryAsync(byId.Values, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            _arbiter.Release(ProcessingArbiter.BatchOwner);
+            throw;
         }
 
-        var recovered = await RecoverPoolLinkedFailuresAsync(batchId, cancellationToken).ConfigureAwait(false);
-        var retryable = await _accountRepository.GetRetryEligibleAsync(batchId, cancellationToken).ConfigureAwait(false);
-        var byId = retryable.ToDictionary(a => a.Id);
-        foreach (var account in recovered)
-        {
-            byId[account.Id] = account;
-        }
+        await StartClaimedRun(batchId, cancellationToken).ConfigureAwait(false);
+    }
 
-        if (byId.Count == 0)
-        {
-            throw new InvalidOperationException(
-                "No retryable failures. Re-import the TXT on Batch (Import TXT), then click Start Processing.");
-        }
-
-        foreach (var account in byId.Values)
+    private async Task RequeueForRetryAsync(IEnumerable<AccountRecord> accounts, CancellationToken cancellationToken)
+    {
+        foreach (var account in accounts)
         {
             account.ProcessingState = ProcessingState.Queued;
             account.BackoffUntil = null;
@@ -128,8 +147,46 @@ public sealed class BatchProcessor : IBatchProcessor
             _microsoftAccessCache.TryRemove(account.Id, out _);
             await _accountRepository.UpsertAsync(account, cancellationToken).ConfigureAwait(false);
         }
+    }
 
-        await StartAsync(batchId, cancellationToken).ConfigureAwait(false);
+    /// <summary>
+    /// Claims the shared run slot, translating a failed claim into the message the UI expects.
+    /// </summary>
+    private void AcquireRunSlot()
+    {
+        if (_arbiter.TryAcquire(ProcessingArbiter.BatchOwner))
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            _arbiter.IsHeldBy(ProcessingArbiter.PoolOwner)
+                ? "Pool refresh is running. Wait for it to finish before starting batch processing."
+                : "A batch is already running. Wait for it to finish or click Cancel first.");
+    }
+
+    /// <summary>Starts a run that already owns the slot; the run releases it when it finishes.</summary>
+    private Task StartClaimedRun(Guid batchId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            _runCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _runTask = RunBatchAsync(batchId, _runCts.Token);
+            return _runTask;
+        }
+        catch
+        {
+            ReleaseRunSlot();
+            throw;
+        }
+    }
+
+    private void ReleaseRunSlot()
+    {
+        var cts = _runCts;
+        _runCts = null;
+        cts?.Dispose();
+        _arbiter.Release(ProcessingArbiter.BatchOwner);
     }
 
     /// <summary>
@@ -190,15 +247,19 @@ public sealed class BatchProcessor : IBatchProcessor
 
     public Task RefreshAccountAsync(Guid batchId, Guid accountId, CancellationToken cancellationToken = default)
     {
-        EnsurePoolNotRunning();
-        if (IsRunning)
-        {
-            throw new InvalidOperationException("A batch is still running. Wait for it to finish or click Cancel first.");
-        }
+        AcquireRunSlot();
 
-        _runCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        _runTask = RefreshSingleAccountAsync(batchId, accountId, _runCts.Token);
-        return _runTask;
+        try
+        {
+            _runCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _runTask = RefreshSingleAccountAsync(batchId, accountId, _runCts.Token);
+            return _runTask;
+        }
+        catch
+        {
+            ReleaseRunSlot();
+            throw;
+        }
     }
 
     private async Task RefreshSingleAccountAsync(Guid batchId, Guid accountId, CancellationToken cancellationToken)
@@ -222,7 +283,7 @@ public sealed class BatchProcessor : IBatchProcessor
             _throttleCoordinator.Initialize(batch.ConcurrencyLimit);
             await _batchRepository.UpsertAsync(batch, cancellationToken).ConfigureAwait(false);
 
-            var queue = new Queue<AccountRecord>();
+            var queue = new ConcurrentQueue<AccountRecord>();
             await ProcessAccountAsync(batch, account, queue, cancellationToken).ConfigureAwait(false);
 
             batch = await RecalculateBatchAsync(batchId, cancellationToken).ConfigureAwait(false);
@@ -233,8 +294,7 @@ public sealed class BatchProcessor : IBatchProcessor
         }
         finally
         {
-            _runCts?.Dispose();
-            _runCts = null;
+            ReleaseRunSlot();
         }
     }
 
@@ -293,76 +353,180 @@ public sealed class BatchProcessor : IBatchProcessor
             }
 
             var processable = await _accountRepository.GetIncompleteByBatchIdAsync(batchId, cancellationToken).ConfigureAwait(false);
-            var queue = new Queue<AccountRecord>(processable.Where(a => a.ProcessingState is ProcessingState.Queued or ProcessingState.Backoff));
+            // Workers re-enqueue their own account on retryable failures, so the queue is written
+            // from several threads at once and must be concurrent.
+            var queue = new ConcurrentQueue<AccountRecord>(
+                processable.Where(a => a.ProcessingState is ProcessingState.Queued or ProcessingState.Backoff));
             var workers = new List<Task>();
 
-            while (queue.Count > 0 || workers.Count > 0)
+            try
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                await _throttleCoordinator.WaitForGlobalLimitAsync(cancellationToken).ConfigureAwait(false);
-
-                workers.RemoveAll(w => w.IsCompleted);
-                while (queue.Count > 0 && workers.Count < _throttleCoordinator.EffectiveConcurrency)
+                while (!queue.IsEmpty || workers.Count > 0)
                 {
-                    var account = queue.Dequeue();
-                    if (account.BackoffUntil.HasValue && account.BackoffUntil.Value > DateTimeOffset.UtcNow)
-                    {
-                        queue.Enqueue(account);
-                        break;
-                    }
+                    cancellationToken.ThrowIfCancellationRequested();
 
-                    if (account.DuplicateOfRecordId.HasValue)
+                    await _throttleCoordinator.WaitForGlobalLimitAsync(cancellationToken).ConfigureAwait(false);
+
+                    HarvestCompletedWorkers(workers);
+                    var dispatched = 0;
+                    while (workers.Count < _throttleCoordinator.EffectiveConcurrency && queue.TryDequeue(out var account))
                     {
-                        var original = await _accountRepository.GetByIdAsync(account.DuplicateOfRecordId.Value, cancellationToken)
-                            .ConfigureAwait(false);
-                        // Only skip true in-batch duplicates. Pool overlaps are allowed to refresh here.
-                        if (original is not null && original.BatchId == account.BatchId)
+                        if (account.BackoffUntil.HasValue && account.BackoffUntil.Value > DateTimeOffset.UtcNow)
                         {
-                            account.ProcessingState = ProcessingState.Failed;
-                            account.FailureStage = FailureStage.Parse;
-                            account.ErrorCategory = ErrorCategory.MalformedInput;
-                            account.ServiceErrorDetail = $"Possible duplicate of record {account.DuplicateOfRecordId.Value}.";
-                            account.IsErrorCauseConfirmed = true;
-                            await PersistAccountAndUpdateBatchAsync(batch, account, cancellationToken).ConfigureAwait(false);
-                            continue;
+                            // Rotate to the tail so ready accounts behind it still get a turn.
+                            queue.Enqueue(account);
+                            break;
                         }
+
+                        if (account.DuplicateOfRecordId.HasValue)
+                        {
+                            var original = await _accountRepository.GetByIdAsync(account.DuplicateOfRecordId.Value, cancellationToken)
+                                .ConfigureAwait(false);
+                            // Only skip true in-batch duplicates. Pool overlaps are allowed to refresh here.
+                            if (original is not null && original.BatchId == account.BatchId)
+                            {
+                                account.ProcessingState = ProcessingState.Failed;
+                                account.FailureStage = FailureStage.Parse;
+                                account.ErrorCategory = ErrorCategory.MalformedInput;
+                                account.ServiceErrorDetail = $"Possible duplicate of record {account.DuplicateOfRecordId.Value}.";
+                                account.IsErrorCauseConfirmed = true;
+                                await PersistAccountAndUpdateBatchAsync(batch, account, cancellationToken).ConfigureAwait(false);
+                                continue;
+                            }
+                        }
+
+                        workers.Add(ProcessAccountAsync(batch, account, queue, cancellationToken));
+                        dispatched++;
                     }
 
-                    workers.Add(ProcessAccountAsync(batch, account, queue, cancellationToken));
-                }
-
-                if (workers.Count == 0 && queue.Count > 0)
-                {
-                    await Task.Delay(500, cancellationToken).ConfigureAwait(false);
-                }
-                else if (workers.Count > 0)
-                {
-                    await Task.WhenAny(workers).ConfigureAwait(false);
+                    if (workers.Count > 0)
+                    {
+                        await Task.WhenAny(workers).ConfigureAwait(false);
+                    }
+                    else if (!queue.IsEmpty && dispatched == 0)
+                    {
+                        // Everything left is still in backoff; sleep until the soonest one is due
+                        // instead of spinning dequeue/enqueue every 500ms.
+                        await Task.Delay(ComputeIdleDelay(queue), cancellationToken).ConfigureAwait(false);
+                    }
                 }
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // Fall through and finalise the batch as Cancelled below.
+            }
+            finally
+            {
+                // In-flight workers hold the linked token; let them observe cancellation and finish
+                // before ReleaseRunSlot disposes the source underneath them.
+                await DrainWorkersAsync(workers).ConfigureAwait(false);
+            }
 
-            batch = await RecalculateBatchAsync(batchId, cancellationToken).ConfigureAwait(false);
-            batch.Status = cancellationToken.IsCancellationRequested ? BatchStatus.Cancelled : BatchStatus.Completed;
+            // Finalise with None: using the cancelled token here left the batch stuck at Running,
+            // which then looked like an interrupted batch on the next launch.
+            var cancelled = cancellationToken.IsCancellationRequested;
+            batch = await RecalculateBatchAsync(batchId, CancellationToken.None).ConfigureAwait(false);
+            batch.Status = cancelled ? BatchStatus.Cancelled : BatchStatus.Completed;
             batch.CompletedAt = DateTimeOffset.UtcNow;
-            if (cancellationToken.IsCancellationRequested)
+            if (cancelled)
             {
                 batch.CancelledAt = DateTimeOffset.UtcNow;
             }
 
-            await _batchRepository.UpsertAsync(batch, cancellationToken).ConfigureAwait(false);
+            await _batchRepository.UpsertAsync(batch, CancellationToken.None).ConfigureAwait(false);
             RaiseProgress(batch);
         }
         finally
         {
-            _runCts?.Dispose();
-            _runCts = null;
+            ReleaseRunSlot();
         }
+    }
+
+    /// <summary>
+    /// Drops finished workers from the tracking list, touching <see cref="Task.Exception"/> so a
+    /// fault that escaped <see cref="ProcessAccountAsync"/> is observed and logged rather than
+    /// silently discarded.
+    /// </summary>
+    private void HarvestCompletedWorkers(List<Task> workers)
+    {
+        for (var i = workers.Count - 1; i >= 0; i--)
+        {
+            var worker = workers[i];
+            if (!worker.IsCompleted)
+            {
+                continue;
+            }
+
+            workers.RemoveAt(i);
+            if (worker.IsFaulted && worker.Exception is { } error)
+            {
+                _logger.LogInfo($"Batch worker faulted: {error.GetBaseException().GetType().Name}");
+            }
+        }
+    }
+
+    private async Task DrainWorkersAsync(List<Task> workers)
+    {
+        if (workers.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await Task.WhenAll(workers).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            _logger.LogInfo($"Batch worker faulted while draining: {ex.GetType().Name}");
+        }
+        finally
+        {
+            workers.Clear();
+        }
+    }
+
+    /// <summary>
+    /// How long the coordinator may idle when nothing could be dispatched. Returns zero if any
+    /// queued account is already due (the head may be in backoff while a later one is ready),
+    /// otherwise the wait until the soonest backoff expires, capped so the loop keeps re-checking
+    /// the global rate limit and cancellation.
+    /// </summary>
+    private static TimeSpan ComputeIdleDelay(ConcurrentQueue<AccountRecord> queue)
+    {
+        var now = DateTimeOffset.UtcNow;
+        TimeSpan? soonest = null;
+
+        foreach (var account in queue)
+        {
+            var until = account.BackoffUntil;
+            if (!until.HasValue || until.Value <= now)
+            {
+                return TimeSpan.Zero;
+            }
+
+            var wait = until.Value - now;
+            if (soonest is null || wait < soonest.Value)
+            {
+                soonest = wait;
+            }
+        }
+
+        if (soonest is not { } delay)
+        {
+            return TimeSpan.Zero;
+        }
+
+        return delay < MaxIdlePoll ? delay : MaxIdlePoll;
     }
 
     private async Task ProcessAccountAsync(
         BatchRecord batch,
         AccountRecord account,
-        Queue<AccountRecord> queue,
+        ConcurrentQueue<AccountRecord> queue,
         CancellationToken cancellationToken)
     {
         try
@@ -375,7 +539,7 @@ public sealed class BatchProcessor : IBatchProcessor
 
             if (account.ParseStatus != ParseStatus.Parsed || string.IsNullOrWhiteSpace(account.CredentialReference))
             {
-                await FailAsync(batch, account, FailureStage.Parse, ErrorCategory.MalformedInput, "Record was not parsed successfully.", true, false, cancellationToken)
+                await FailAsync(batch, account, queue, FailureStage.Parse, ErrorCategory.MalformedInput, "Record was not parsed successfully.", true, false, cancellationToken)
                     .ConfigureAwait(false);
                 return;
             }
@@ -383,14 +547,14 @@ public sealed class BatchProcessor : IBatchProcessor
             var credential = await _credentialStore.RetrieveAsync(account.CredentialReference, cancellationToken).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(credential))
             {
-                await FailAsync(batch, account, FailureStage.Authentication, ErrorCategory.MissingCredential, "Credential could not be retrieved from secure storage.", true, false, cancellationToken)
+                await FailAsync(batch, account, queue, FailureStage.Authentication, ErrorCategory.MissingCredential, "Credential could not be retrieved from secure storage.", true, false, cancellationToken)
                     .ConfigureAwait(false);
                 return;
             }
 
             if (!_microsoftAuthAdapter.IsConfigured || !_minecraftIdentityAdapter.IsConfigured)
             {
-                await FailAsync(batch, account, FailureStage.Authentication, ErrorCategory.ConfigurationRequired,
+                await FailAsync(batch, account, queue, FailureStage.Authentication, ErrorCategory.ConfigurationRequired,
                     "Authentication profile is not verified. Complete Phase 0 and configure authentication_profile.json.", true, false, cancellationToken)
                     .ConfigureAwait(false);
                 return;
@@ -415,7 +579,7 @@ public sealed class BatchProcessor : IBatchProcessor
 
                 if (string.IsNullOrWhiteSpace(msResult.MicrosoftAccessToken))
                 {
-                    await FailAsync(batch, account, FailureStage.Authentication, ErrorCategory.CredentialRejected,
+                    await FailAsync(batch, account, queue, FailureStage.Authentication, ErrorCategory.CredentialRejected,
                         "Microsoft authentication succeeded but no access token was returned.", false, false, cancellationToken)
                         .ConfigureAwait(false);
                     return;
@@ -474,14 +638,16 @@ public sealed class BatchProcessor : IBatchProcessor
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            // Persist with None: the token is already cancelled, so passing it here meant the
+            // Cancelled state never reached the database.
             account.ProcessingState = ProcessingState.Cancelled;
             account.ErrorCategory = ErrorCategory.Cancelled;
-            await PersistAccountAndUpdateBatchAsync(batch, account, cancellationToken).ConfigureAwait(false);
+            await PersistAccountAndUpdateBatchAsync(batch, account, CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             _logger.LogInfo($"Unexpected error for record {account.Id}: {ex.GetType().Name}");
-            await FailAsync(batch, account, FailureStage.Authentication, ErrorCategory.Unknown, ex.Message, false, true, cancellationToken)
+            await FailAsync(batch, account, queue, FailureStage.Authentication, ErrorCategory.Unknown, ex.Message, false, true, CancellationToken.None)
                 .ConfigureAwait(false);
         }
     }
@@ -514,7 +680,7 @@ public sealed class BatchProcessor : IBatchProcessor
         BatchRecord batch,
         AccountRecord account,
         AuthenticationResult result,
-        Queue<AccountRecord> queue,
+        ConcurrentQueue<AccountRecord> queue,
         CancellationToken cancellationToken)
     {
         account.FailureStage = result.FailureStage;
@@ -567,6 +733,7 @@ public sealed class BatchProcessor : IBatchProcessor
     private async Task FailAsync(
         BatchRecord batch,
         AccountRecord account,
+        ConcurrentQueue<AccountRecord> queue,
         FailureStage stage,
         ErrorCategory category,
         string detail,
@@ -574,16 +741,25 @@ public sealed class BatchProcessor : IBatchProcessor
         bool retryable,
         CancellationToken cancellationToken)
     {
-        account.ProcessingState = retryable ? ProcessingState.Backoff : ProcessingState.Failed;
         account.FailureStage = stage;
         account.ErrorCategory = category;
         account.ServiceErrorDetail = detail;
         account.IsErrorCauseConfirmed = confirmed;
+
+        // Only enter Backoff when the policy will actually retry, and re-queue when we do.
+        // Previously a retryable=true call with a non-retryable category (e.g. Unknown from the
+        // catch-all) parked the record in Backoff with no BackoffUntil and never re-queued it, so
+        // it was counted as Pending forever and the batch "completed" with work outstanding.
         if (retryable && _retryPolicy.CanRetry(account, category))
         {
+            account.ProcessingState = ProcessingState.Backoff;
             account.BackoffUntil = DateTimeOffset.UtcNow.Add(_retryPolicy.ComputeBackoff(account, null));
+            await PersistAccountAndUpdateBatchAsync(batch, account, cancellationToken).ConfigureAwait(false);
+            queue.Enqueue(account);
+            return;
         }
 
+        account.ProcessingState = ProcessingState.Failed;
         await PersistAccountAndUpdateBatchAsync(batch, account, cancellationToken).ConfigureAwait(false);
     }
 
@@ -621,13 +797,4 @@ public sealed class BatchProcessor : IBatchProcessor
     private static bool NeedsAccessTokenRefresh(AccountRecord account) =>
         account.ProcessingState == ProcessingState.Succeeded &&
         string.IsNullOrWhiteSpace(account.MinecraftAccessTokenReference);
-
-    private void EnsurePoolNotRunning()
-    {
-        var pool = _serviceProvider.GetService<IPoolProcessor>();
-        if (pool?.IsRunning == true)
-        {
-            throw new InvalidOperationException("Pool refresh is running. Wait for it to finish before starting batch processing.");
-        }
-    }
 }

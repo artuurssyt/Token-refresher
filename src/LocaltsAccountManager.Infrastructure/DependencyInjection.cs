@@ -45,6 +45,7 @@ public static class DependencyInjection
         services.AddSingleton<IPhase0Investigator, Phase0Investigator>();
         services.AddSingleton<RetryPolicy>();
         services.AddSingleton<ThrottleCoordinator>();
+        services.AddSingleton<ProcessingArbiter>();
         services.AddSingleton<IBatchProcessor, BatchProcessor>();
         services.AddSingleton<IPoolProcessor, PoolProcessor>();
 
