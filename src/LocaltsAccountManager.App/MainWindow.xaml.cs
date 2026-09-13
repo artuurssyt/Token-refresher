@@ -14,9 +14,24 @@ public partial class MainWindow : Window
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
-        if (DataContext is MainViewModel vm)
+        if (DataContext is not MainViewModel vm)
+        {
+            return;
+        }
+
+        // async void event handler: an exception escaping here reaches the dispatcher handler as a
+        // bare message box, so surface the load failure with context instead.
+        try
         {
             await vm.InitializeAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                $"Could not load saved accounts.\n\n{ex.GetType().Name}: {ex.Message}",
+                "Startup",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
         }
     }
 

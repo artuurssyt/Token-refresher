@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
@@ -91,7 +92,7 @@ public sealed class ExportService : IExportService
 
         var outDir = ResolveLibraryOutputDirectory(_settingsStore, outputDirectory);
         Directory.CreateDirectory(outDir);
-        var path = Path.Combine(outDir, $"{filePrefix}_{usernames.Count}_{DateTime.Now:yyyyMMdd_HHmmss}.txt");
+        var path = Path.Combine(outDir, $"{filePrefix}_{usernames.Count}_{FileStamp()}.txt");
         await File.WriteAllLinesAsync(path, usernames, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
         return path;
     }
@@ -235,7 +236,7 @@ public sealed class ExportService : IExportService
 
         var outDir = ResolveLibraryOutputDirectory(_settingsStore, outputDirectory);
         Directory.CreateDirectory(outDir);
-        var path = Path.Combine(outDir, $"pool_refresh_tokens_{written}_{DateTime.Now:yyyyMMdd_HHmmss}.txt");
+        var path = Path.Combine(outDir, $"pool_refresh_tokens_{written}_{FileStamp()}.txt");
         await File.WriteAllLinesAsync(path, lines, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
         return path;
     }
@@ -254,6 +255,7 @@ public sealed class ExportService : IExportService
     {
         Directory.CreateDirectory(outDir);
         var tempDir = Path.Combine(Path.GetTempPath(), "LocaltsAccountManager", Guid.NewGuid().ToString("N"));
+        var stagingZip = tempDir + ".zip";
 
         Directory.CreateDirectory(tempDir);
         var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -283,8 +285,12 @@ public sealed class ExportService : IExportService
                 throw new InvalidOperationException(BuildMissingTokenMessage(accounts.Count, skipped));
             }
 
-            var zipPath = Path.Combine(outDir, $"{zipPrefix}_{written}_{DateTime.Now:yyyyMMdd_HHmmss}.zip");
-            ZipFile.CreateFromDirectory(tempDir, zipPath, CompressionLevel.Optimal, includeBaseDirectory: false);
+            var zipPath = Path.Combine(outDir, $"{zipPrefix}_{written}_{FileStamp()}.zip");
+
+            // Build in the temp area and move into place so a failure part-way through cannot
+            // leave a truncated .zip in the export folder that looks like a finished export.
+            ZipFile.CreateFromDirectory(tempDir, stagingZip, CompressionLevel.Optimal, includeBaseDirectory: false);
+            File.Move(stagingZip, zipPath, overwrite: true);
 
             return new ExportZipResult
             {
@@ -295,10 +301,37 @@ public sealed class ExportService : IExportService
         }
         finally
         {
-            if (Directory.Exists(tempDir))
+            TryDeleteDirectory(tempDir);
+            TryDeleteFile(stagingZip);
+        }
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
             {
-                Directory.Delete(tempDir, recursive: true);
+                Directory.Delete(path, recursive: true);
             }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Temp cleanup is best-effort; never mask the export result.
+        }
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
         }
     }
 
@@ -332,6 +365,20 @@ public sealed class ExportService : IExportService
         return candidate + ".txt";
     }
 
+    /// <summary>Longest name we put before the extension, leaving room inside path limits.</summary>
+    private const int MaxFileNameLength = 120;
+
+    /// <summary>
+    /// Win32 reserves these regardless of extension, so "CON.txt" is still the console device.
+    /// One such username used to make <c>File.WriteAllTextAsync</c> throw and abort the whole ZIP.
+    /// </summary>
+    private static readonly HashSet<string> ReservedDeviceNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+    };
+
     private static string SanitizeFileName(string name)
     {
         if (string.IsNullOrWhiteSpace(name))
@@ -341,9 +388,29 @@ public sealed class ExportService : IExportService
 
         var invalid = Path.GetInvalidFileNameChars();
         var chars = name.Trim().Select(ch => invalid.Contains(ch) ? '_' : ch).ToArray();
-        var sanitized = new string(chars).Trim('.');
-        return string.IsNullOrWhiteSpace(sanitized) ? "account" : sanitized;
+
+        // Windows also rejects names ending in a dot or space.
+        var sanitized = new string(chars).Trim().TrimEnd('.', ' ').Trim('.');
+
+        if (sanitized.Length > MaxFileNameLength)
+        {
+            sanitized = sanitized[..MaxFileNameLength];
+        }
+
+        if (string.IsNullOrWhiteSpace(sanitized))
+        {
+            return "account";
+        }
+
+        return ReservedDeviceNames.Contains(sanitized) ? "_" + sanitized : sanitized;
     }
+
+    /// <summary>
+    /// Sortable UTC stamp for export filenames. The current culture was used before, so a host on
+    /// a non-Gregorian calendar (Thai Buddhist, Umm al-Qura) produced a misleading year.
+    /// </summary>
+    private static string FileStamp() =>
+        DateTime.UtcNow.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
 
     public async Task<string> ExportErrorsAsync(Guid batchId, string? outputDirectory = null, CancellationToken cancellationToken = default)
     {

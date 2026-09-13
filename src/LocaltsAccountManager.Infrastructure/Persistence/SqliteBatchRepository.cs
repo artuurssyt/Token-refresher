@@ -2,6 +2,7 @@ using Microsoft.Data.Sqlite;
 using LocaltsAccountManager.Core.Enums;
 using LocaltsAccountManager.Core.Interfaces;
 using LocaltsAccountManager.Core.Models;
+using LocaltsAccountManager.Infrastructure.Paths;
 
 namespace LocaltsAccountManager.Infrastructure.Persistence;
 
@@ -11,18 +12,16 @@ public sealed class SqliteBatchRepository : IBatchRepository
 
     public SqliteBatchRepository()
     {
-        var dbPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "LocaltsAccountManager",
-            "accounts.db");
+        var dbPath = ApplicationPaths.DatabaseFile;
         Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
-        _connectionString = new SqliteConnectionStringBuilder { DataSource = dbPath }.ConnectionString;
+        _connectionString = SqliteSupport.BuildConnectionString(dbPath);
     }
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await SqliteSupport.OpenAsync(_connectionString, cancellationToken).ConfigureAwait(false);
+        await SqliteSupport.EnableWriteAheadLoggingAsync(connection, cancellationToken).ConfigureAwait(false);
+
         var command = connection.CreateCommand();
         command.CommandText = """
             CREATE TABLE IF NOT EXISTS batches (
@@ -51,8 +50,7 @@ public sealed class SqliteBatchRepository : IBatchRepository
 
     public async Task UpsertAsync(BatchRecord batch, CancellationToken cancellationToken = default)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await SqliteSupport.OpenAsync(_connectionString, cancellationToken).ConfigureAwait(false);
         var command = connection.CreateCommand();
         command.CommandText = """
             INSERT INTO batches (
@@ -88,8 +86,7 @@ public sealed class SqliteBatchRepository : IBatchRepository
 
     public async Task<BatchRecord?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await SqliteSupport.OpenAsync(_connectionString, cancellationToken).ConfigureAwait(false);
         var command = connection.CreateCommand();
         command.CommandText = "SELECT * FROM batches WHERE Id = $Id LIMIT 1;";
         command.Parameters.AddWithValue("$Id", id.ToString());
@@ -99,8 +96,7 @@ public sealed class SqliteBatchRepository : IBatchRepository
 
     public async Task<IReadOnlyList<BatchRecord>> GetRecentAsync(int count = 20, CancellationToken cancellationToken = default)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await SqliteSupport.OpenAsync(_connectionString, cancellationToken).ConfigureAwait(false);
         var command = connection.CreateCommand();
         command.CommandText = "SELECT * FROM batches ORDER BY CreatedAt DESC LIMIT $Count;";
         command.Parameters.AddWithValue("$Count", count);
@@ -116,8 +112,7 @@ public sealed class SqliteBatchRepository : IBatchRepository
 
     public async Task<BatchRecord?> GetLatestIncompleteAsync(CancellationToken cancellationToken = default)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await SqliteSupport.OpenAsync(_connectionString, cancellationToken).ConfigureAwait(false);
         var command = connection.CreateCommand();
         command.CommandText = """
             SELECT * FROM batches
@@ -133,8 +128,7 @@ public sealed class SqliteBatchRepository : IBatchRepository
 
     public async Task<BatchRecord?> GetLatestForStartupAsync(CancellationToken cancellationToken = default)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await SqliteSupport.OpenAsync(_connectionString, cancellationToken).ConfigureAwait(false);
 
         var active = connection.CreateCommand();
         active.CommandText = """
@@ -166,7 +160,21 @@ public sealed class SqliteBatchRepository : IBatchRepository
             }
         }
 
-        return await GetLatestIncompleteAsync(cancellationToken).ConfigureAwait(false);
+        // Reuse the open connection instead of calling GetLatestIncompleteAsync, which would open
+        // a second one while this is still held.
+        var incomplete = connection.CreateCommand();
+        incomplete.CommandText = """
+            SELECT * FROM batches
+            WHERE Status IN ($Running, $Paused, $Created)
+            ORDER BY CreatedAt DESC LIMIT 1;
+            """;
+        incomplete.Parameters.AddWithValue("$Running", (int)BatchStatus.Running);
+        incomplete.Parameters.AddWithValue("$Paused", (int)BatchStatus.PausedRateLimited);
+        incomplete.Parameters.AddWithValue("$Created", (int)BatchStatus.Created);
+        await using (var reader = await incomplete.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+        {
+            return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadBatch(reader) : null;
+        }
     }
 
     private static void BindBatch(SqliteCommand command, BatchRecord batch)
@@ -191,25 +199,33 @@ public sealed class SqliteBatchRepository : IBatchRepository
         command.Parameters.AddWithValue("$GlobalRateLimitUntil", batch.GlobalRateLimitUntil?.ToString("O") ?? (object)DBNull.Value);
     }
 
+    // Resolved by name rather than ordinal: the queries use SELECT *, so any future column
+    // added ahead of an existing one would have silently shifted every value across.
     private static BatchRecord ReadBatch(SqliteDataReader reader) => new()
     {
-        Id = Guid.Parse(reader.GetString(0)),
-        Name = reader.GetString(1),
-        SourceFilePath = reader.GetString(2),
-        OutputDirectory = reader.GetString(3),
-        Status = (BatchStatus)reader.GetInt32(4),
-        CreatedAt = DateTimeOffset.Parse(reader.GetString(5)),
-        StartedAt = reader.IsDBNull(6) ? null : DateTimeOffset.Parse(reader.GetString(6)),
-        CompletedAt = reader.IsDBNull(7) ? null : DateTimeOffset.Parse(reader.GetString(7)),
-        CancelledAt = reader.IsDBNull(8) ? null : DateTimeOffset.Parse(reader.GetString(8)),
-        TotalRecords = reader.GetInt32(9),
-        Succeeded = reader.GetInt32(10),
-        Failed = reader.GetInt32(11),
-        Pending = reader.GetInt32(12),
-        Cancelled = reader.GetInt32(13),
-        DuplicatesFlagged = reader.GetInt32(14),
-        ConcurrencyLimit = reader.GetInt32(15),
-        EffectiveConcurrency = reader.GetInt32(16),
-        GlobalRateLimitUntil = reader.IsDBNull(17) ? null : DateTimeOffset.Parse(reader.GetString(17))
+        Id = Guid.Parse(reader.GetString(reader.GetOrdinal("Id"))),
+        Name = reader.GetString(reader.GetOrdinal("Name")),
+        SourceFilePath = reader.GetString(reader.GetOrdinal("SourceFilePath")),
+        OutputDirectory = reader.GetString(reader.GetOrdinal("OutputDirectory")),
+        Status = (BatchStatus)reader.GetInt32(reader.GetOrdinal("Status")),
+        CreatedAt = SqliteSupport.ParseTimestamp(reader.GetString(reader.GetOrdinal("CreatedAt"))),
+        StartedAt = ReadOptionalDate(reader, "StartedAt"),
+        CompletedAt = ReadOptionalDate(reader, "CompletedAt"),
+        CancelledAt = ReadOptionalDate(reader, "CancelledAt"),
+        TotalRecords = reader.GetInt32(reader.GetOrdinal("TotalRecords")),
+        Succeeded = reader.GetInt32(reader.GetOrdinal("Succeeded")),
+        Failed = reader.GetInt32(reader.GetOrdinal("Failed")),
+        Pending = reader.GetInt32(reader.GetOrdinal("Pending")),
+        Cancelled = reader.GetInt32(reader.GetOrdinal("Cancelled")),
+        DuplicatesFlagged = reader.GetInt32(reader.GetOrdinal("DuplicatesFlagged")),
+        ConcurrencyLimit = reader.GetInt32(reader.GetOrdinal("ConcurrencyLimit")),
+        EffectiveConcurrency = reader.GetInt32(reader.GetOrdinal("EffectiveConcurrency")),
+        GlobalRateLimitUntil = ReadOptionalDate(reader, "GlobalRateLimitUntil")
     };
+
+    private static DateTimeOffset? ReadOptionalDate(SqliteDataReader reader, string columnName)
+    {
+        var ordinal = reader.GetOrdinal(columnName);
+        return reader.IsDBNull(ordinal) ? null : SqliteSupport.TryParseTimestamp(reader.GetString(ordinal));
+    }
 }

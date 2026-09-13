@@ -2,6 +2,7 @@ using Microsoft.Data.Sqlite;
 using LocaltsAccountManager.Core.Enums;
 using LocaltsAccountManager.Core.Interfaces;
 using LocaltsAccountManager.Core.Models;
+using LocaltsAccountManager.Infrastructure.Paths;
 
 namespace LocaltsAccountManager.Infrastructure.Persistence;
 
@@ -11,18 +12,16 @@ public sealed class SqliteAccountRepository : IAccountRepository
 
     public SqliteAccountRepository()
     {
-        var dbPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "LocaltsAccountManager",
-            "accounts.db");
+        var dbPath = ApplicationPaths.DatabaseFile;
         Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
-        _connectionString = new SqliteConnectionStringBuilder { DataSource = dbPath }.ConnectionString;
+        _connectionString = SqliteSupport.BuildConnectionString(dbPath);
     }
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await SqliteSupport.OpenAsync(_connectionString, cancellationToken).ConfigureAwait(false);
+        await SqliteSupport.EnableWriteAheadLoggingAsync(connection, cancellationToken).ConfigureAwait(false);
+
         var command = connection.CreateCommand();
         command.CommandText = """
             CREATE TABLE IF NOT EXISTS accounts (
@@ -153,8 +152,7 @@ public sealed class SqliteAccountRepository : IAccountRepository
     public async Task UpsertAsync(AccountRecord record, CancellationToken cancellationToken = default)
     {
         record.UpdatedAt = DateTimeOffset.UtcNow;
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await SqliteSupport.OpenAsync(_connectionString, cancellationToken).ConfigureAwait(false);
         var command = connection.CreateCommand();
         command.CommandText = """
             INSERT INTO accounts (
@@ -209,8 +207,7 @@ public sealed class SqliteAccountRepository : IAccountRepository
 
     public async Task<AccountRecord?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await SqliteSupport.OpenAsync(_connectionString, cancellationToken).ConfigureAwait(false);
         var command = connection.CreateCommand();
         command.CommandText = "SELECT * FROM accounts WHERE Id = $Id LIMIT 1;";
         command.Parameters.AddWithValue("$Id", id.ToString());
@@ -220,8 +217,7 @@ public sealed class SqliteAccountRepository : IAccountRepository
 
     public async Task<IReadOnlyList<AccountRecord>> GetByBatchIdAsync(Guid batchId, CancellationToken cancellationToken = default)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await SqliteSupport.OpenAsync(_connectionString, cancellationToken).ConfigureAwait(false);
         var command = connection.CreateCommand();
         command.CommandText = "SELECT * FROM accounts WHERE BatchId = $BatchId ORDER BY SourceLine;";
         command.Parameters.AddWithValue("$BatchId", batchId.ToString());
@@ -230,8 +226,7 @@ public sealed class SqliteAccountRepository : IAccountRepository
 
     public async Task<IReadOnlyList<AccountRecord>> GetIncompleteByBatchIdAsync(Guid batchId, CancellationToken cancellationToken = default)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await SqliteSupport.OpenAsync(_connectionString, cancellationToken).ConfigureAwait(false);
         var command = connection.CreateCommand();
         command.CommandText = """
             SELECT * FROM accounts
@@ -264,8 +259,7 @@ public sealed class SqliteAccountRepository : IAccountRepository
             ErrorCategory.VendorRateLimited
         };
 
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await SqliteSupport.OpenAsync(_connectionString, cancellationToken).ConfigureAwait(false);
         var command = connection.CreateCommand();
         command.CommandText = """
             SELECT * FROM accounts
@@ -287,8 +281,7 @@ public sealed class SqliteAccountRepository : IAccountRepository
 
     public async Task<IReadOnlyList<AccountRecord>> GetAllSucceededAsync(CancellationToken cancellationToken = default)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await SqliteSupport.OpenAsync(_connectionString, cancellationToken).ConfigureAwait(false);
         var command = connection.CreateCommand();
         command.CommandText = """
             SELECT * FROM accounts
@@ -339,8 +332,7 @@ public sealed class SqliteAccountRepository : IAccountRepository
 
     public async Task<IReadOnlyList<AccountRecord>> GetPoolAccountsAsync(CancellationToken cancellationToken = default)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await SqliteSupport.OpenAsync(_connectionString, cancellationToken).ConfigureAwait(false);
         var command = connection.CreateCommand();
         command.CommandText = """
             SELECT * FROM accounts
@@ -353,8 +345,7 @@ public sealed class SqliteAccountRepository : IAccountRepository
 
     public async Task<AccountRecord?> GetPoolAccountByFingerprintAsync(string tokenFingerprint, CancellationToken cancellationToken = default)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await SqliteSupport.OpenAsync(_connectionString, cancellationToken).ConfigureAwait(false);
         var command = connection.CreateCommand();
         command.CommandText = """
             SELECT * FROM accounts
@@ -369,8 +360,7 @@ public sealed class SqliteAccountRepository : IAccountRepository
 
     public async Task DeleteAsync(Guid id, CancellationToken cancellationToken = default)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await SqliteSupport.OpenAsync(_connectionString, cancellationToken).ConfigureAwait(false);
         var command = connection.CreateCommand();
         command.CommandText = "DELETE FROM accounts WHERE Id = $Id;";
         command.Parameters.AddWithValue("$Id", id.ToString());
@@ -477,12 +467,12 @@ public sealed class SqliteAccountRepository : IAccountRepository
             ServiceErrorDetail = reader.IsDBNull(reader.GetOrdinal("ServiceErrorDetail")) ? null : reader.GetString(reader.GetOrdinal("ServiceErrorDetail")),
             IsErrorCauseConfirmed = reader.GetInt32(reader.GetOrdinal("IsErrorCauseConfirmed")) == 1,
             RetryCount = reader.GetInt32(reader.GetOrdinal("RetryCount")),
-            LastAttemptAt = reader.IsDBNull(reader.GetOrdinal("LastAttemptAt")) ? null : DateTimeOffset.Parse(reader.GetString(reader.GetOrdinal("LastAttemptAt"))),
-            LastSuccessAt = reader.IsDBNull(reader.GetOrdinal("LastSuccessAt")) ? null : DateTimeOffset.Parse(reader.GetString(reader.GetOrdinal("LastSuccessAt"))),
-            BackoffUntil = reader.IsDBNull(reader.GetOrdinal("BackoffUntil")) ? null : DateTimeOffset.Parse(reader.GetString(reader.GetOrdinal("BackoffUntil"))),
+            LastAttemptAt = ReadOptionalDate(reader, "LastAttemptAt"),
+            LastSuccessAt = ReadOptionalDate(reader, "LastSuccessAt"),
+            BackoffUntil = ReadOptionalDate(reader, "BackoffUntil"),
             DuplicateOfRecordId = reader.IsDBNull(reader.GetOrdinal("DuplicateOfRecordId")) ? null : Guid.Parse(reader.GetString(reader.GetOrdinal("DuplicateOfRecordId"))),
-            CreatedAt = DateTimeOffset.Parse(reader.GetString(reader.GetOrdinal("CreatedAt"))),
-            UpdatedAt = DateTimeOffset.Parse(reader.GetString(reader.GetOrdinal("UpdatedAt"))),
+            CreatedAt = SqliteSupport.ParseTimestamp(reader.GetString(reader.GetOrdinal("CreatedAt"))),
+            UpdatedAt = SqliteSupport.ParseTimestamp(reader.GetString(reader.GetOrdinal("UpdatedAt"))),
             MicrosoftAccessTokenExpiresAt = ReadOptionalDate(reader, "MicrosoftAccessTokenExpiresAt"),
             MinecraftAccessTokenExpiresAt = ReadOptionalDate(reader, "MinecraftAccessTokenExpiresAt"),
             RefreshCredentialUpdatedAt = ReadOptionalDate(reader, "RefreshCredentialUpdatedAt"),
@@ -507,7 +497,7 @@ public sealed class SqliteAccountRepository : IAccountRepository
     private static DateTimeOffset? ReadOptionalDate(SqliteDataReader reader, string column)
     {
         var ordinal = reader.GetOrdinal(column);
-        return reader.IsDBNull(ordinal) ? null : DateTimeOffset.Parse(reader.GetString(ordinal));
+        return reader.IsDBNull(ordinal) ? null : SqliteSupport.TryParseTimestamp(reader.GetString(ordinal));
     }
 
     private static async Task<IReadOnlyList<AccountRecord>> ReadAllAsync(SqliteCommand command, CancellationToken cancellationToken)

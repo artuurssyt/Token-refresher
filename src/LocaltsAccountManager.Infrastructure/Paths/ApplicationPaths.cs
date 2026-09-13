@@ -25,11 +25,29 @@ public static class ApplicationPaths
 
     public static string DefaultExportDirectory => Path.Combine(InstallDirectory, "exports");
 
-    public static string LocalAppDataRoot => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "LocaltsAccountManager");
+    public static string LocalAppDataRoot => Path.Combine(LocalAppDataBase, "LocaltsAccountManager");
 
     public static string LocalAppDataExports => Path.Combine(LocalAppDataRoot, "exports");
+
+    /// <summary>Database file shared by the account and batch repositories.</summary>
+    public static string DatabaseFile => Path.Combine(LocalAppDataRoot, "accounts.db");
+
+    /// <summary>Folder holding DPAPI-protected credential blobs.</summary>
+    public static string CredentialsDirectory => Path.Combine(LocalAppDataRoot, "credentials");
+
+    /// <summary>
+    /// Local AppData, falling back to the install directory when Windows reports no profile
+    /// folder. Without the fallback an empty value silently turned every app path into a relative
+    /// one rooted at the current working directory.
+    /// </summary>
+    private static string LocalAppDataBase
+    {
+        get
+        {
+            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            return string.IsNullOrWhiteSpace(localAppData) ? InstallDirectory : localAppData;
+        }
+    }
 
     /// <summary>
     /// True for the old hardcoded F:\ default, empty values, or a root that Windows cannot use.

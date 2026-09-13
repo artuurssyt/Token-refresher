@@ -23,15 +23,25 @@ public sealed class AuthenticationProfileStore : IAuthenticationProfileStore
             return CreateDefaultTemplate();
         }
 
-        var json = File.ReadAllText(ProfilePath, Encoding.UTF8);
-        return JsonSerializer.Deserialize<AuthenticationProfile>(json, JsonOptions) ?? CreateDefaultTemplate();
+        // Load is called during DI setup, so a damaged file used to throw before the main window
+        // existed and the app died with no message. Fall back to the template instead.
+        try
+        {
+            var json = File.ReadAllText(ProfilePath, Encoding.UTF8);
+            return JsonSerializer.Deserialize<AuthenticationProfile>(json, JsonOptions) ?? CreateDefaultTemplate();
+        }
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+        {
+            ConfigurationFileSafety.QuarantineCorruptFile(ProfilePath);
+            return CreateDefaultTemplate();
+        }
     }
 
     public void Save(AuthenticationProfile profile)
     {
         Directory.CreateDirectory(GetAppRoot());
         var json = JsonSerializer.Serialize(profile, JsonOptions);
-        File.WriteAllText(ProfilePath, json, Encoding.UTF8);
+        ConfigurationFileSafety.WriteAllTextAtomic(ProfilePath, json);
     }
 
     public static AuthenticationProfile CreateDefaultTemplate() => new()
@@ -65,17 +75,27 @@ public sealed class AuthenticationProfileStore : IAuthenticationProfileStore
     public static void EnsureTemplateExists()
     {
         var store = new AuthenticationProfileStore();
-        if (!File.Exists(store.ProfilePath))
-        {
-            store.Save(CreateDefaultTemplate());
-            return;
-        }
 
-        // Upgrade previously blocked / empty profiles to Localts-extracted defaults.
-        var existing = store.Load();
-        if (!existing.IsVerified || !existing.Microsoft.IsConfigured || !existing.Minecraft.IsConfigured)
+        // Runs while the DI container is being built, before any window exists, so an unwritable
+        // profile folder must not take the process down. Load() already falls back to the
+        // in-memory template when the file cannot be read.
+        try
         {
-            store.Save(CreateDefaultTemplate());
+            if (!File.Exists(store.ProfilePath))
+            {
+                store.Save(CreateDefaultTemplate());
+                return;
+            }
+
+            // Upgrade previously blocked / empty profiles to Localts-extracted defaults.
+            var existing = store.Load();
+            if (!existing.IsVerified || !existing.Microsoft.IsConfigured || !existing.Minecraft.IsConfigured)
+            {
+                store.Save(CreateDefaultTemplate());
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
         }
     }
 
@@ -90,9 +110,35 @@ public sealed class AppSettingsStore : IAppSettingsStore
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
+    private readonly object _sync = new();
+
+    /// <summary>
+    /// Serialized snapshot of the last known settings. <see cref="Load"/> is called on every retry,
+    /// backoff and throttle decision, so reading and migrating the file each time meant constant
+    /// disk I/O (and a rewrite whenever a migration fired) from every worker thread at once.
+    /// </summary>
+    private string? _cachedJson;
+
     public string SettingsPath => Path.Combine(GetAppRoot(), "appsettings.json");
 
     public AppSettings Load()
+    {
+        lock (_sync)
+        {
+            if (_cachedJson is { } cached)
+            {
+                // Deserialize per call so callers still get their own instance to mutate, as they
+                // did when every Load hit the disk.
+                return JsonSerializer.Deserialize<AppSettings>(cached, JsonOptions) ?? new AppSettings();
+            }
+
+            var settings = LoadFromDisk();
+            _cachedJson = JsonSerializer.Serialize(settings, JsonOptions);
+            return settings;
+        }
+    }
+
+    private AppSettings LoadFromDisk()
     {
         if (!File.Exists(SettingsPath))
         {
@@ -100,18 +146,40 @@ public sealed class AppSettingsStore : IAppSettingsStore
             {
                 DefaultExportDirectory = ApplicationPaths.DefaultExportDirectory
             };
-            Save(defaults);
+            TrySave(defaults);
             return defaults;
         }
 
-        var json = File.ReadAllText(SettingsPath, Encoding.UTF8);
-        var settings = JsonSerializer.Deserialize<AppSettings>(json, JsonOptions) ?? new AppSettings();
+        AppSettings settings;
         var dirty = false;
+        try
+        {
+            var json = File.ReadAllText(SettingsPath, Encoding.UTF8);
+            settings = JsonSerializer.Deserialize<AppSettings>(json, JsonOptions) ?? new AppSettings();
+        }
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+        {
+            // A truncated appsettings.json (e.g. power loss during a save) used to throw from every
+            // Load() call, which meant startup, import and export all failed with no way back.
+            ConfigurationFileSafety.QuarantineCorruptFile(SettingsPath);
+            settings = new AppSettings { DefaultExportDirectory = ApplicationPaths.DefaultExportDirectory };
+            dirty = true;
+        }
 
         // Older installs defaulted to concurrency 3 and hammered login_with_xbox into 429s.
-        if (settings.DefaultConcurrency > settings.MaxAdaptiveConcurrency)
+        // Clamp to at least 1: a damaged file with MaxAdaptiveConcurrency <= 0 would otherwise
+        // drag DefaultConcurrency down with it and create batches that never dispatch a worker.
+        var maxConcurrency = Math.Max(1, settings.MaxAdaptiveConcurrency);
+        if (settings.MaxAdaptiveConcurrency != maxConcurrency)
         {
-            settings.DefaultConcurrency = settings.MaxAdaptiveConcurrency;
+            settings.MaxAdaptiveConcurrency = maxConcurrency;
+            dirty = true;
+        }
+
+        var defaultConcurrency = Math.Clamp(settings.DefaultConcurrency, 1, maxConcurrency);
+        if (settings.DefaultConcurrency != defaultConcurrency)
+        {
+            settings.DefaultConcurrency = defaultConcurrency;
             dirty = true;
         }
 
@@ -134,7 +202,7 @@ public sealed class AppSettingsStore : IAppSettingsStore
 
         if (dirty)
         {
-            Save(settings);
+            TrySave(settings);
         }
 
         return settings;
@@ -142,9 +210,30 @@ public sealed class AppSettingsStore : IAppSettingsStore
 
     public void Save(AppSettings settings)
     {
-        Directory.CreateDirectory(GetAppRoot());
-        var json = JsonSerializer.Serialize(settings, JsonOptions);
-        File.WriteAllText(SettingsPath, json, Encoding.UTF8);
+        lock (_sync)
+        {
+            Directory.CreateDirectory(GetAppRoot());
+            var json = JsonSerializer.Serialize(settings, JsonOptions);
+            ConfigurationFileSafety.WriteAllTextAtomic(SettingsPath, json);
+            _cachedJson = json;
+        }
+    }
+
+    /// <summary>
+    /// Persists migrated defaults without letting a read-only or full disk turn a settings read
+    /// into a failure; the in-memory values stay usable either way.
+    /// </summary>
+    private void TrySave(AppSettings settings)
+    {
+        try
+        {
+            Directory.CreateDirectory(GetAppRoot());
+            var json = JsonSerializer.Serialize(settings, JsonOptions);
+            ConfigurationFileSafety.WriteAllTextAtomic(SettingsPath, json);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+        }
     }
 
     private static string GetAppRoot() => ApplicationPaths.LocalAppDataRoot;
