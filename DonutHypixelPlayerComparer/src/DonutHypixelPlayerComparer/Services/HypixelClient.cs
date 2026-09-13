@@ -16,7 +16,8 @@ public sealed class HypixelClient
         _http = http;
         _settings = settings;
         _limiter = new RequestRateLimiter(settings.HypixelRequestsPerMinute, TimeSpan.FromMinutes(1));
-        _headers = new() { ["API-Key"] = settings.HypixelApiKey.Trim() };
+        // A hand-edited or partially written settings file can leave the key null.
+        _headers = new() { ["API-Key"] = (settings.HypixelApiKey ?? string.Empty).Trim() };
     }
 
     public bool IsConfigured => !string.IsNullOrWhiteSpace(_settings.HypixelApiKey);

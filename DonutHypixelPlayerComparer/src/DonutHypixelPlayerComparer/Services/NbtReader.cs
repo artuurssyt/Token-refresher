@@ -6,8 +6,18 @@ namespace DonutHypixelPlayerComparer.Services;
 
 internal sealed class NbtReader
 {
+    /// <summary>
+    /// Compounds and lists recurse, and a StackOverflowException cannot be caught, so malformed or
+    /// hostile item bytes have to be rejected before they can take the process down with them.
+    /// </summary>
+    private const int MaxDepth = 96;
+
+    /// <summary>Collection lengths are attacker-controlled 4-byte fields, so pre-sizing is capped.</summary>
+    private const int MaxPreallocated = 1024;
+
     private readonly Stream _stream;
     private readonly byte[] _buffer = new byte[8];
+    private int _depth;
 
     private NbtReader(Stream stream) => _stream = stream;
 
@@ -48,6 +58,7 @@ internal sealed class NbtReader
     private Dictionary<string, object?> ReadCompound()
     {
         var result = new Dictionary<string, object?>(StringComparer.Ordinal);
+        using var depth = Descend();
         while (true)
         {
             var type = (TagType)ReadByte();
@@ -60,30 +71,58 @@ internal sealed class NbtReader
     {
         var type = (TagType)ReadByte();
         var length = ReadLength();
-        var result = new List<object?>(length);
+        // A TAG_End element reads no bytes, so a non-empty list of them would spin without ever
+        // hitting the end of the stream.
+        if (type == TagType.End && length > 0) throw new InvalidDataException("NBT list of TAG_End is not valid.");
+        using var depth = Descend();
+        var result = new List<object?>(Math.Min(length, MaxPreallocated));
         for (var index = 0; index < length; index++) result.Add(ReadPayload(type));
         return result;
     }
 
+    private DepthScope Descend()
+    {
+        if (++_depth > MaxDepth) throw new InvalidDataException("NBT nesting is too deep.");
+        return new DepthScope(this);
+    }
+
+    private readonly struct DepthScope(NbtReader reader) : IDisposable
+    {
+        public void Dispose() => reader._depth--;
+    }
+
+    // Declared lengths are never trusted for the initial allocation: the arrays grow as bytes are
+    // actually read, so a truncated payload fails on the stream rather than on a huge allocation.
     private byte[] ReadByteArray()
     {
-        var value = new byte[ReadLength()];
-        ReadExactly(value);
+        var length = ReadLength();
+        var value = new byte[Math.Min(length, MaxPreallocated)];
+        var read = 0;
+        while (read < length)
+        {
+            if (read == value.Length) Array.Resize(ref value, (int)Math.Min(length, value.Length * 2L));
+            var count = _stream.Read(value, read, value.Length - read);
+            if (count == 0) throw new EndOfStreamException();
+            read += count;
+        }
+        if (value.Length != length) Array.Resize(ref value, length);
         return value;
     }
 
     private int[] ReadIntArray()
     {
-        var value = new int[ReadLength()];
-        for (var index = 0; index < value.Length; index++) value[index] = ReadInt32();
-        return value;
+        var length = ReadLength();
+        var value = new List<int>(Math.Min(length, MaxPreallocated));
+        for (var index = 0; index < length; index++) value.Add(ReadInt32());
+        return value.ToArray();
     }
 
     private long[] ReadLongArray()
     {
-        var value = new long[ReadLength()];
-        for (var index = 0; index < value.Length; index++) value[index] = ReadInt64();
-        return value;
+        var length = ReadLength();
+        var value = new List<long>(Math.Min(length, MaxPreallocated));
+        for (var index = 0; index < length; index++) value.Add(ReadInt64());
+        return value.ToArray();
     }
 
     private int ReadLength()

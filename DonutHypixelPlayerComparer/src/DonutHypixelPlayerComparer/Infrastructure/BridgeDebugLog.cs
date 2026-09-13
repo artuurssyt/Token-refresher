@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 
 namespace DonutHypixelPlayerComparer.Infrastructure;
@@ -18,7 +19,8 @@ public static class BridgeDebugLog
                 var file = new FileInfo(AppPaths.BridgeLogFile);
                 if (file.Exists && file.Length > MaxBytes) file.Delete();
                 var text = new StringBuilder()
-                    .Append('[').Append(DateTimeOffset.Now.ToString("HH:mm:ss.fff")).Append("] ")
+                    .Append('[').Append(DateTimeOffset.Now.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture))
+                    .Append("] ")
                     .Append(message);
                 if (!string.IsNullOrWhiteSpace(detail))
                     text.AppendLine().Append("    ").Append(detail.ReplaceLineEndings(" "));

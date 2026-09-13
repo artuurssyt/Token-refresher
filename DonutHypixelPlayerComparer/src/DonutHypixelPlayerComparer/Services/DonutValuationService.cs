@@ -4,9 +4,13 @@ namespace DonutHypixelPlayerComparer.Services;
 
 public static class DonutValuationService
 {
+    /// <param name="donutSource">
+    /// "API" or "Bridge" — which route actually produced the stats. The bridge cannot see the auction
+    /// house, so the methodology text has to follow the route taken rather than the bridge setting.
+    /// </param>
     public static (ValuationBreakdown Valuation, List<AssetLine> Assets) Calculate(
         DonutStats? stats, string username, string uuid, IReadOnlyList<DonutAuctionListing> allListings,
-        AppSettings settings)
+        AppSettings settings, string donutSource = "")
     {
         var valuation = new ValuationBreakdown();
         var assets = new List<AssetLine>();
@@ -38,12 +42,15 @@ public static class DonutValuationService
                 Category = "DonutSMP shards",
                 ItemId = "SHARD",
                 DisplayName = "Shards (configured conversion)",
-                Count = (int)Math.Min(int.MaxValue, stats.Shards),
+                Count = (int)Math.Clamp(stats.Shards, 0, int.MaxValue),
                 UnitPrice = settings.DonutShardUnitValue,
                 PriceSource = settings.DonutShardUnitValue > 0 ? "User-configured shard value" : "Not monetized"
             });
         }
-        valuation.Methodology = settings.DonutBridgeEnabled
+        var viaBridge = donutSource.Length == 0
+            ? settings.DonutBridgeEnabled
+            : donutSource.Equals("Bridge", StringComparison.OrdinalIgnoreCase);
+        valuation.Methodology = viaBridge
             ? "In-game /stats GUI via Minecraft client bridge: money plus configured shard value. Auction listings are unavailable without the DonutSMP API."
             : "Official money balance plus this player's visible current auction asking prices and the configured shard value. " +
               "DonutSMP's official API does not expose player inventory, Ender Chest, base contents, or other held assets, " +

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json.Serialization;
 
 namespace DonutHypixelPlayerComparer.Models;
@@ -88,9 +89,11 @@ public sealed class PlayerScanResult
     private static string FormatDuration(long seconds)
     {
         var duration = TimeSpan.FromSeconds(Math.Max(0, seconds));
+        // Invariant so the exported text matches regardless of the operator's regional settings.
         return duration.TotalDays >= 1
-            ? $"{(int)duration.TotalDays}d {duration.Hours}h {duration.Minutes}m"
-            : $"{duration.Hours}h {duration.Minutes}m";
+            ? string.Format(CultureInfo.InvariantCulture, "{0}d {1}h {2}m",
+                (int)duration.TotalDays, duration.Hours, duration.Minutes)
+            : string.Format(CultureInfo.InvariantCulture, "{0}h {1}m", duration.Hours, duration.Minutes);
     }
 }
 

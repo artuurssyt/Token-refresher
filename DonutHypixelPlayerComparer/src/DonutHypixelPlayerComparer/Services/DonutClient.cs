@@ -16,7 +16,8 @@ public sealed class DonutClient
         _http = http;
         _settings = settings;
         _limiter = new RequestRateLimiter(settings.DonutRequestsPerMinute, TimeSpan.FromMinutes(1));
-        _headers = new() { ["Authorization"] = "Bearer " + settings.DonutApiKey.Trim() };
+        // A hand-edited or partially written settings file can leave the key null.
+        _headers = new() { ["Authorization"] = "Bearer " + (settings.DonutApiKey ?? string.Empty).Trim() };
     }
 
     public bool IsConfigured => !string.IsNullOrWhiteSpace(_settings.DonutApiKey);
@@ -29,7 +30,7 @@ public sealed class DonutClient
             var age = TimeSpan.FromMinutes(_settings.PlayerCacheMinutes);
             using var statsDocument = await _http.GetJsonAsync(
                 $"https://api.donutsmp.net/v1/stats/{Uri.EscapeDataString(username)}",
-                _headers, _limiter, age, token);
+                _headers, _limiter, age, token).ConfigureAwait(false);
             var root = statsDocument.RootElement;
             if (!root.TryGetProperty("result", out var result) || result.ValueKind != System.Text.Json.JsonValueKind.Object)
                 return null;
@@ -50,7 +51,7 @@ public sealed class DonutClient
             {
                 using var lookupDocument = await _http.GetJsonAsync(
                     $"https://api.donutsmp.net/v1/lookup/{Uri.EscapeDataString(username)}",
-                    _headers, _limiter, age, token);
+                    _headers, _limiter, age, token).ConfigureAwait(false);
                 if (lookupDocument.RootElement.TryGetProperty("result", out var lookup))
                 {
                     stats.Rank = JsonValue.String(lookup, "rank", string.Empty);
@@ -93,7 +94,7 @@ public sealed class DonutClient
         for (var page = 1; page <= _settings.MaxDonutAuctionPages; page++)
         {
             using var document = await _http.GetJsonAsync($"https://api.donutsmp.net/v1/auction/list/{page}",
-                _headers, _limiter, age, token);
+                _headers, _limiter, age, token).ConfigureAwait(false);
             if (!document.RootElement.TryGetProperty("result", out var result)
                 || result.ValueKind != System.Text.Json.JsonValueKind.Array) break;
             var nonNull = 0;
@@ -109,7 +110,8 @@ public sealed class DonutClient
                     SellerUuid = JsonValue.String(seller, "uuid", string.Empty).Replace("-", string.Empty),
                     ItemId = JsonValue.String(item, "id", string.Empty),
                     DisplayName = JsonValue.String(item, "display_name", string.Empty),
-                    Count = (int)Math.Max(1, JsonValue.Long(item, "count", 1)),
+                    // Clamped rather than cast: an out-of-range count would otherwise wrap negative.
+                    Count = (int)Math.Clamp(JsonValue.Long(item, "count", 1), 1, int.MaxValue),
                     Price = JsonValue.Decimal(entry, "price")
                 });
             }

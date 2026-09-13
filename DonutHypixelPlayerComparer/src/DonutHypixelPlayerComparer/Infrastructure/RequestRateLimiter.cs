@@ -18,7 +18,7 @@ public sealed class RequestRateLimiter
         while (true)
         {
             TimeSpan delay;
-            await _mutex.WaitAsync(token);
+            await _mutex.WaitAsync(token).ConfigureAwait(false);
             try
             {
                 var now = DateTimeOffset.UtcNow;
@@ -32,7 +32,7 @@ public sealed class RequestRateLimiter
                 delay = _period - (now - _timestamps.Peek()) + TimeSpan.FromMilliseconds(25);
             }
             finally { _mutex.Release(); }
-            await Task.Delay(delay, token);
+            await Task.Delay(delay, token).ConfigureAwait(false);
         }
     }
 }

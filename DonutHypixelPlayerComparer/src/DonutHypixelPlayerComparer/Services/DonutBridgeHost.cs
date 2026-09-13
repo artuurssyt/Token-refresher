@@ -88,7 +88,10 @@ public sealed class DonutBridgeHost : IDisposable
                     $"Could not start Donut bridge on port {_settings.DonutBridgePort}. Close other apps using that port. ({ex.Message})");
             }
             _active = true;
-            _loop = Task.Run(() => ListenAsync(_cts.Token));
+            // The token is read now, not when the task body starts: Dispose can null _cts first,
+            // which would kill the listen loop with a NullReferenceException nobody ever sees.
+            var loopToken = _cts.Token;
+            _loop = Task.Run(() => ListenAsync(loopToken));
         }
         BridgeDebugLog.StartSession(
             $"Bridge session started on {listenerPrefix} (job timeout {_settings.DonutBridgeJobTimeoutSeconds}s, command '{_settings.DonutBridgeCommandTemplate}')");
@@ -160,6 +163,7 @@ public sealed class DonutBridgeHost : IDisposable
             {
                 _jobs.TryRemove(job.JobId, out _);
                 if (ReferenceEquals(_leasedJob, job)) _leasedJob = null;
+                job.Abandoned = true;
             }
         }
     }
@@ -207,6 +211,15 @@ public sealed class DonutBridgeHost : IDisposable
     {
         try
         {
+            if (!IsLoopbackHost(context.Request.UserHostName))
+            {
+                // The listener is loopback-only, but a page in the user's browser can still reach it
+                // through a hostname that resolves to 127.0.0.1. Requiring a loopback Host header
+                // keeps the bridge answering only to things that addressed it as localhost.
+                Emit($"Bridge: rejected a request with a non-loopback Host header '{context.Request.UserHostName}'.");
+                await WriteTextAsync(context, 403, "Forbidden");
+                return;
+            }
             var path = context.Request.Url?.AbsolutePath.TrimEnd('/') ?? string.Empty;
             var method = context.Request.HttpMethod.ToUpperInvariant();
             if (method == "GET" && path == "/api/v1/status")
@@ -232,6 +245,26 @@ public sealed class DonutBridgeHost : IDisposable
             BridgeDebugLog.Write("Bridge: request handler threw " + ex.GetType().Name, ex.Message);
             try { await WriteJsonAsync(context, 500, new { error = "Bridge request failed." }); } catch { }
         }
+    }
+
+    internal static bool IsLoopbackHost(string? hostHeader)
+    {
+        if (string.IsNullOrWhiteSpace(hostHeader)) return false;
+        var host = hostHeader.Trim();
+        // Strip the port, taking care not to split an unbracketed IPv6 literal on its own colons.
+        if (host.StartsWith('['))
+        {
+            var end = host.IndexOf(']');
+            if (end < 0) return false;
+            host = host[1..end];
+        }
+        else
+        {
+            var colon = host.IndexOf(':');
+            if (colon >= 0 && host.IndexOf(':', colon + 1) < 0) host = host[..colon];
+        }
+        if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase)) return true;
+        return IPAddress.TryParse(host, out var address) && IPAddress.IsLoopback(address);
     }
 
     private object BuildStatusPayload()
@@ -269,8 +302,14 @@ public sealed class DonutBridgeHost : IDisposable
             return;
         }
         heartbeat.ReceivedAt = DateTimeOffset.UtcNow;
-        var first = _heartbeat is null;
-        _heartbeat = heartbeat;
+        bool first;
+        // Status reads _heartbeat under the gate, so the swap belongs there too — otherwise two
+        // concurrent heartbeats can both decide they are the first one.
+        lock (_gate)
+        {
+            first = _heartbeat is null;
+            _heartbeat = heartbeat;
+        }
         if (first)
             Emit($"Bridge: client connected — {heartbeat.PlayerName} on {heartbeat.ServerAddress} (v{heartbeat.ClientVersion}).");
         await WriteJsonAsync(context, 200, new { ok = true });
@@ -278,13 +317,26 @@ public sealed class DonutBridgeHost : IDisposable
 
     private async Task HandleNextJobAsync(HttpListenerContext context)
     {
-        if (!_queue.TryDequeue(out var job))
+        // A caller that timed out or was cancelled leaves its job in the queue. Handing that job to
+        // the client would make it walk an abandoned player and would pin the status display to a
+        // username nothing is waiting for, so those are skipped here.
+        BridgeJob? job = null;
+        while (_queue.TryDequeue(out var candidate))
+        {
+            lock (_gate)
+            {
+                if (candidate.Abandoned || !_jobs.ContainsKey(candidate.JobId)) continue;
+                job = candidate;
+                _leasedJob = candidate;
+            }
+            break;
+        }
+        if (job is null)
         {
             context.Response.StatusCode = 204;
             context.Response.Close();
             return;
         }
-        lock (_gate) { _leasedJob = job; }
         job.MarkLeased();
         Emit($"Bridge: client took job for {job.Username} (job {job.JobId[..8]}).");
         await WriteJsonAsync(context, 200, new { jobId = job.JobId, username = job.Username });
@@ -296,6 +348,9 @@ public sealed class DonutBridgeHost : IDisposable
         var body = await ReadBodyAsync(context.Request);
         if (!_jobs.TryGetValue(jobId, out var job))
         {
+            // The lease has to be released even when its job is gone, or the status bar keeps
+            // reporting a player that nothing is waiting for.
+            ReleaseLease(jobId);
             Emit($"Bridge: completion for unknown/expired job {Shorten(jobId)} was ignored.",
                 BridgeDebugLog.Preview(body));
             await WriteJsonAsync(context, 404, new { error = "Unknown job." });
@@ -365,6 +420,7 @@ public sealed class DonutBridgeHost : IDisposable
         var body = await ReadBodyAsync(context.Request);
         if (!_jobs.TryGetValue(jobId, out var job))
         {
+            ReleaseLease(jobId);
             Emit($"Bridge: failure report for unknown/expired job {Shorten(jobId)} was ignored.",
                 BridgeDebugLog.Preview(body));
             await WriteJsonAsync(context, 404, new { error = "Unknown job." });
@@ -399,14 +455,33 @@ public sealed class DonutBridgeHost : IDisposable
         await WriteJsonAsync(context, 200, new { ok = true });
     }
 
+    /// <summary>
+    /// Reads at most one body's worth of characters. A chunked request reports ContentLength64 as -1,
+    /// so the length header alone cannot be trusted to bound the read.
+    /// </summary>
     private static async Task<string?> ReadBodyAsync(HttpListenerRequest request)
     {
         if (request.ContentLength64 > MaxRequestBodyBytes) return null;
         using var reader = new StreamReader(request.InputStream, request.ContentEncoding);
-        var body = await reader.ReadToEndAsync();
-        if (body.Length > MaxRequestBodyBytes) return null;
-        if (string.IsNullOrWhiteSpace(body)) return null;
-        return body;
+        var buffer = new char[8192];
+        var builder = new StringBuilder();
+        while (builder.Length <= MaxRequestBodyBytes)
+        {
+            var read = await reader.ReadAsync(buffer).ConfigureAwait(false);
+            if (read == 0) break;
+            builder.Append(buffer, 0, read);
+        }
+        if (builder.Length > MaxRequestBodyBytes) return null;
+        var body = builder.ToString();
+        return string.IsNullOrWhiteSpace(body) ? null : body;
+    }
+
+    private void ReleaseLease(string jobId)
+    {
+        lock (_gate)
+        {
+            if (_leasedJob is not null && _leasedJob.JobId == jobId) _leasedJob = null;
+        }
     }
 
     private static string Shorten(string jobId) =>
@@ -432,8 +507,18 @@ public sealed class DonutBridgeHost : IDisposable
         context.Response.ContentType = contentType + "; charset=utf-8";
         var bytes = Encoding.UTF8.GetBytes(text);
         context.Response.ContentLength64 = bytes.Length;
-        await context.Response.OutputStream.WriteAsync(bytes);
-        context.Response.Close();
+        try
+        {
+            await context.Response.OutputStream.WriteAsync(bytes).ConfigureAwait(false);
+            context.Response.Close();
+        }
+        catch (HttpListenerException)
+        {
+            // The Minecraft client hung up mid-write; drop the connection instead of leaking it.
+            context.Response.Abort();
+        }
+        catch (ObjectDisposedException) { }
+        catch (IOException) { context.Response.Abort(); }
     }
 
     private sealed class BridgeJob
@@ -446,6 +531,9 @@ public sealed class DonutBridgeHost : IDisposable
 
         public string JobId { get; }
         public string Username { get; }
+
+        /// <summary>Set once the caller has stopped waiting; guarded by the host's gate.</summary>
+        public bool Abandoned { get; set; }
         public TaskCompletionSource<bool> Leased { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<BridgeJobResult> Completion { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);

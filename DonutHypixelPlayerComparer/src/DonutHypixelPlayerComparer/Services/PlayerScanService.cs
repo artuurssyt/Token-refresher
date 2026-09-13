@@ -81,17 +81,19 @@ public sealed class PlayerScanService : IDisposable
             {
                 var marketProgress = new Progress<string>(message => progress?.Report(
                     new ScanProgress(0, usernames.Count, message, BridgeStatus: _bridge?.Status)));
-                market = await new MarketPriceService(_hypixel, _settings).LoadAsync(marketProgress, token);
+                market = await new MarketPriceService(_hypixel, _settings).LoadAsync(marketProgress, token).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is ApiException or HttpRequestException)
+            // Market prices are an enrichment, never a reason to abandon the whole scan, so anything
+            // short of the user cancelling is downgraded to a warning.
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 setupErrors.Add("SkyBlock market prices unavailable: " + ex.Message);
             }
         }
         if (_donut.IsConfigured)
         {
-            try { donutListings = await _donut.GetAuctionListingsAsync(token); }
-            catch (Exception ex) when (ex is ApiException or HttpRequestException)
+            try { donutListings = await _donut.GetAuctionListingsAsync(token).ConfigureAwait(false); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 setupErrors.Add("DonutSMP auction listings unavailable: " + ex.Message);
             }
@@ -103,15 +105,16 @@ public sealed class PlayerScanService : IDisposable
         // Only bridge calls have to be serial, and _bridgeGate already enforces that, so an API-first
         // scan keeps its parallelism instead of being slowed to one player at a time.
         var concurrency = _bridge is not null && (!_donut.IsConfigured || _settings.DonutBridgeOnly) ? 1 : _settings.Concurrency;
-        using var gate = new SemaphoreSlim(concurrency);
+        // Settings normally arrive normalized, but a hand-edited file must not throw here.
+        using var gate = new SemaphoreSlim(Math.Clamp(concurrency, 1, 64));
         try
         {
             var tasks = usernames.Select(async input =>
             {
-                await gate.WaitAsync(token);
+                await gate.WaitAsync(token).ConfigureAwait(false);
                 try
                 {
-                    var result = await ScanOneAsync(input, market, donutListings, token);
+                    var result = await ScanOneAsync(input, market, donutListings, token).ConfigureAwait(false);
                     results.Add(result);
                     var count = Interlocked.Increment(ref completed);
                     var message = string.IsNullOrWhiteSpace(result.Error)
@@ -121,7 +124,7 @@ public sealed class PlayerScanService : IDisposable
                 }
                 finally { gate.Release(); }
             }).ToArray();
-            await Task.WhenAll(tasks);
+            await Task.WhenAll(tasks).ConfigureAwait(false);
         }
         finally
         {
@@ -137,7 +140,7 @@ public sealed class PlayerScanService : IDisposable
         var result = new PlayerScanResult { Username = input, Status = "Resolving" };
         try
         {
-            var identity = await _identity.ResolveAsync(input, token);
+            var identity = await _identity.ResolveAsync(input, token).ConfigureAwait(false);
             if (identity is null)
             {
                 result.Status = "Not found";
@@ -148,15 +151,16 @@ public sealed class PlayerScanService : IDisposable
             result.Uuid = identity.Uuid;
             var errors = new List<string>();
 
-            await FetchDonutAsync(result, identity, donutListings, errors, token);
+            await FetchDonutAsync(result, identity, donutListings, errors, token).ConfigureAwait(false);
 
             if (_hypixel.IsConfigured)
             {
                 try
                 {
-                    using var profiles = await _hypixel.GetProfilesAsync(identity.Uuid, token);
+                    using var profiles = await _hypixel.GetProfilesAsync(identity.Uuid, token).ConfigureAwait(false);
                     var data = await new SkyBlockValuationService(_hypixel, _settings)
-                        .CalculateAsync(profiles.RootElement, identity.Uuid, market, token);
+                        .CalculateAsync(profiles.RootElement, identity.Uuid, market, token)
+                        .ConfigureAwait(false);
                     result.SkyBlockProfile = data.SelectedProfile;
                     result.SkyBlockProfiles = data.AllProfiles;
                     result.SkyBlockLevel = data.Level;
@@ -209,7 +213,7 @@ public sealed class PlayerScanService : IDisposable
         {
             try
             {
-                result.Donut = await _donut.GetStatsAsync(identity.Name, token);
+                result.Donut = await _donut.GetStatsAsync(identity.Name, token).ConfigureAwait(false);
                 if (result.Donut is not null)
                 {
                     Volatile.Write(ref _consecutiveApiFailures, 0);
@@ -226,10 +230,10 @@ public sealed class PlayerScanService : IDisposable
 
         if (result.Donut is null && BridgeReady)
         {
-            await _bridgeGate.WaitAsync(token);
+            await _bridgeGate.WaitAsync(token).ConfigureAwait(false);
             try
             {
-                result.Donut = await _bridge!.WaitForStatsAsync(identity.Name, token);
+                result.Donut = await _bridge!.WaitForStatsAsync(identity.Name, token).ConfigureAwait(false);
                 // The bridge reads one player's GUI and never sees the auction house.
                 listings = Array.Empty<DonutAuctionListing>();
                 if (result.Donut is not null) result.DonutSource = "Bridge";
@@ -243,7 +247,7 @@ public sealed class PlayerScanService : IDisposable
 
         if (result.Donut is null) return;
         var donutValue = DonutValuationService.Calculate(result.Donut, identity.Name,
-            identity.Uuid, listings, _settings);
+            identity.Uuid, listings, _settings, result.DonutSource);
         result.DonutValuation = donutValue.Valuation;
         result.DonutAuctionListingsValue = donutValue.Valuation.OtherAssetsValue
             - result.Donut.Shards * _settings.DonutShardUnitValue;

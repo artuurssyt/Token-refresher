@@ -6,6 +6,12 @@ namespace DonutHypixelPlayerComparer.Services;
 
 public sealed class MarketPriceService
 {
+    /// <summary>
+    /// "0 = all pages" still has to mean a finite number: totalPages comes straight off the wire, and
+    /// a wrong or hostile value would otherwise schedule that many page requests.
+    /// </summary>
+    private const int AbsoluteMaxAuctionPages = 200;
+
     private readonly HypixelClient _client;
     private readonly AppSettings _settings;
 
@@ -19,26 +25,26 @@ public sealed class MarketPriceService
     {
         var snapshot = new MarketSnapshot();
         progress?.Report("Loading SkyBlock Bazaar and NPC prices…");
-        await LoadBazaarAsync(snapshot, token);
-        await LoadNpcPricesAsync(snapshot, token);
+        await LoadBazaarAsync(snapshot, token).ConfigureAwait(false);
+        await LoadNpcPricesAsync(snapshot, token).ConfigureAwait(false);
 
         progress?.Report("Loading SkyBlock active-auction prices…");
-        using var firstDocument = await _client.GetAuctionsPageAsync(0, token);
+        using var firstDocument = await _client.GetAuctionsPageAsync(0, token).ConfigureAwait(false);
         var first = ExtractAuctionPage(firstDocument.RootElement);
         ApplyAuctionCandidates(snapshot, first.Candidates);
         var pageLimit = _settings.MaxHypixelAuctionPages == 0
             ? first.TotalPages
             : Math.Min(first.TotalPages, _settings.MaxHypixelAuctionPages);
-        pageLimit = Math.Max(1, pageLimit);
+        pageLimit = Math.Clamp(pageLimit, 1, AbsoluteMaxAuctionPages);
         snapshot.AuctionPagesLoaded = 1;
 
         using var gate = new SemaphoreSlim(Math.Min(4, _settings.Concurrency));
         var tasks = Enumerable.Range(1, Math.Max(0, pageLimit - 1)).Select(async page =>
         {
-            await gate.WaitAsync(token);
+            await gate.WaitAsync(token).ConfigureAwait(false);
             try
             {
-                using var document = await _client.GetAuctionsPageAsync(page, token);
+                using var document = await _client.GetAuctionsPageAsync(page, token).ConfigureAwait(false);
                 var data = ExtractAuctionPage(document.RootElement);
                 progress?.Report($"Loaded SkyBlock market page {page + 1}/{pageLimit}");
                 return data.Candidates;
@@ -46,7 +52,7 @@ public sealed class MarketPriceService
             finally { gate.Release(); }
         }).ToArray();
 
-        foreach (var candidates in await Task.WhenAll(tasks))
+        foreach (var candidates in await Task.WhenAll(tasks).ConfigureAwait(false))
         {
             ApplyAuctionCandidates(snapshot, candidates);
             snapshot.AuctionPagesLoaded++;
@@ -57,7 +63,7 @@ public sealed class MarketPriceService
 
     private async Task LoadBazaarAsync(MarketSnapshot snapshot, CancellationToken token)
     {
-        using var document = await _client.GetBazaarAsync(token);
+        using var document = await _client.GetBazaarAsync(token).ConfigureAwait(false);
         if (!document.RootElement.TryGetProperty("products", out var products)) return;
         foreach (var product in products.EnumerateObject())
         {
@@ -80,7 +86,7 @@ public sealed class MarketPriceService
 
     private async Task LoadNpcPricesAsync(MarketSnapshot snapshot, CancellationToken token)
     {
-        using var document = await _client.GetItemsAsync(token);
+        using var document = await _client.GetItemsAsync(token).ConfigureAwait(false);
         if (!document.RootElement.TryGetProperty("items", out var items)) return;
         foreach (var item in items.EnumerateArray())
         {

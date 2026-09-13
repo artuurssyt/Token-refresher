@@ -59,26 +59,28 @@ public sealed class SkyBlockValuationService
                                   && member.TryGetProperty("inventory", out var inventoryNode)
                                   && inventoryNode.ValueKind == JsonValueKind.Object;
 
+        // A skipped section silently lowers the estimate, so record it instead of hiding it.
+        var skipped = new List<string>();
         var profileId = JsonValue.String(selected, "profile_id", string.Empty);
         if (_settings.IncludeMuseum && profileId.Length > 0)
         {
             try
             {
-                using var museum = await _client.GetMuseumAsync(profileId, token);
+                using var museum = await _client.GetMuseumAsync(profileId, token).ConfigureAwait(false);
                 var museumMember = museum.RootElement.TryGetProperty("members", out var museumMembers)
                     ? FindByUuid(museumMembers, uuid) : default;
                 if (museumMember.ValueKind != JsonValueKind.Undefined)
                     foreach (var group in JsonAssetWalker.Extract(museumMember, "museum"))
                         AddItems("Other assets", group.Items, market, breakdown, assets);
             }
-            catch (ApiException) { }
+            catch (ApiException ex) { skipped.Add("museum (" + ex.Message + ")"); }
         }
 
         if (_settings.IncludePlayerAuctions)
         {
             try
             {
-                using var auctions = await _client.GetPlayerAuctionsAsync(uuid, token);
+                using var auctions = await _client.GetPlayerAuctionsAsync(uuid, token).ConfigureAwait(false);
                 if (auctions.RootElement.TryGetProperty("auctions", out var auctionArray))
                 {
                     foreach (var auction in auctionArray.EnumerateArray())
@@ -89,7 +91,7 @@ public sealed class SkyBlockValuationService
                     }
                 }
             }
-            catch (ApiException) { }
+            catch (ApiException ex) { skipped.Add("active auctions (" + ex.Message + ")"); }
         }
 
         breakdown.Methodology =
@@ -98,7 +100,10 @@ public sealed class SkyBlockValuationService
             "item upgrades may make the estimate conservative."
             + (inventoryApiEnabled
                 ? string.Empty
-                : " This profile has the SkyBlock inventory API disabled, so no item values could be read.");
+                : " This profile has the SkyBlock inventory API disabled, so no item values could be read.")
+            + (skipped.Count == 0
+                ? string.Empty
+                : " Excluded because the API call failed: " + string.Join("; ", skipped) + ".");
         var consolidated = assets.GroupBy(item => new { item.Category, item.ItemId, item.UnitPrice, item.PriceSource })
             .Select(group => new AssetLine
             {

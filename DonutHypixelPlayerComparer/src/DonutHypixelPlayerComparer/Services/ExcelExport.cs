@@ -49,7 +49,7 @@ public static partial class ExportService
                 writer.WriteStartElement("is");
                 writer.WriteStartElement("t");
                 writer.WriteAttributeString("xml", "space", null, "preserve");
-                writer.WriteString(Format(value));
+                writer.WriteString(StripInvalidXml(Format(value)));
                 writer.WriteEndElement();
                 writer.WriteEndElement();
             }
