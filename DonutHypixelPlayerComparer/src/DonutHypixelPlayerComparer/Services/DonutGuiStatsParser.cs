@@ -193,6 +193,78 @@ public static partial class DonutGuiStatsParser
         return false;
     }
 
+    /// <summary>Parses /bal chat replies such as "ardatzpr has $ 1.2K".</summary>
+    public static bool TryParseBalanceFromChat(IEnumerable<string>? lines, string username, out decimal money)
+    {
+        money = 0;
+        if (lines is null) return false;
+        foreach (var raw in lines)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) continue;
+            var line = Clean(raw);
+            if (line.Length == 0) continue;
+            var lower = line.ToLowerInvariant();
+            var looksLikeBalance = lower.Contains("bal", StringComparison.Ordinal)
+                                   || lower.Contains("money", StringComparison.Ordinal)
+                                   || lower.Contains("coin", StringComparison.Ordinal)
+                                   || lower.Contains('$')
+                                   || lower.Contains("purse", StringComparison.Ordinal);
+            if (!looksLikeBalance && !line.Contains('$')) continue;
+            if (!string.IsNullOrWhiteSpace(username))
+            {
+                var userLower = username.ToLowerInvariant();
+                if (!lower.Contains(userLower, StringComparison.Ordinal)
+                    && !lower.Contains("bal", StringComparison.Ordinal)
+                    && !line.Contains('$'))
+                {
+                    continue;
+                }
+            }
+            var parsed = ParseCompactDecimal(line);
+            if (parsed > 0 || line.Contains('$'))
+            {
+                money = parsed;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// When the Minecraft client posts /fail but captured chat or GUI text, recover a /bal balance
+    /// instead of treating the player as unavailable.
+    /// </summary>
+    public static DonutStats? TrySalvageFromBridgePayload(string? error,
+        IReadOnlyDictionary<string, List<string>>? rawGuiText, string username)
+    {
+        if (rawGuiText?.TryGetValue("chat", out var chatLines) == true
+            && TryParseBalanceFromChat(chatLines, username, out var chatMoney))
+        {
+            return new DonutStats { Money = chatMoney };
+        }
+
+        var lastChat = ExtractLastChatFromError(error);
+        if (lastChat is not null && TryParseBalanceFromChat([lastChat], username, out chatMoney))
+            return new DonutStats { Money = chatMoney };
+
+        if (rawGuiText is not { Count: > 0 }) return null;
+        var payload = new DonutBridgeStatsPayload
+        {
+            RawGuiText = rawGuiText.ToDictionary(pair => pair.Key, pair => pair.Value.ToList())
+        };
+        var stats = FromPayload(payload);
+        return HasMinimumStats(stats, payload) ? stats : null;
+    }
+
+    private static string? ExtractLastChatFromError(string? error)
+    {
+        if (string.IsNullOrWhiteSpace(error)) return null;
+        var match = LastChatPattern().Match(error);
+        if (!match.Success) return null;
+        var text = match.Groups["chat"].Value.Trim();
+        return text.Length == 0 ? null : text;
+    }
+
     public static string ExtractLastNumber(string text)
     {
         text = Clean(text).Replace(",", string.Empty);
@@ -256,6 +328,9 @@ public static partial class DonutGuiStatsParser
 
     private static string Clean(string? text) =>
         text is null ? string.Empty : FormattingPattern().Replace(text, string.Empty).Trim();
+
+    [GeneratedRegex(@"lastChat='(?<chat>(?:\\'|[^'])*?)'", RegexOptions.CultureInvariant)]
+    private static partial Regex LastChatPattern();
 
     [GeneratedRegex(@"(?<num>\d+(?:\.\d+)?)\s*(?<suffix>[kmbt])(?![\p{L}\d])|(?<num>\d+(?:\.\d+)?)(?![\p{L}\d])",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]

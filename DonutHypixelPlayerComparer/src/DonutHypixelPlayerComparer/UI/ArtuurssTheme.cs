@@ -1,8 +1,8 @@
 using System.Drawing;
 
-using DonutComparer.Core.Infrastructure;
-using DonutComparer.Core.Models;
-using DonutComparer.Core.Services;
+using DonutHypixelPlayerComparer.Infrastructure;
+using DonutHypixelPlayerComparer.Models;
+using DonutHypixelPlayerComparer.Services;
 namespace DonutHypixelPlayerComparer.UI;
 
 /// <summary>Palette from https://www.artuurss.com CSS custom properties.</summary>

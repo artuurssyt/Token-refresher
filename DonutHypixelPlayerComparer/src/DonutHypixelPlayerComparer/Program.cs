@@ -1,4 +1,4 @@
-using DonutComparer.Core.Infrastructure;
+using DonutHypixelPlayerComparer.Infrastructure;
 using DonutHypixelPlayerComparer.UI;
 
 namespace DonutHypixelPlayerComparer;

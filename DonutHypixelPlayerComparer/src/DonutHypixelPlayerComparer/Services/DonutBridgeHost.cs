@@ -326,6 +326,11 @@ public sealed class DonutBridgeHost : IDisposable
         try
         {
             stats = DonutGuiStatsParser.FromPayload(payload);
+            if (stats.Money == 0 && payload.RawGuiText?.TryGetValue("chat", out var chatLines) == true
+                && DonutGuiStatsParser.TryParseBalanceFromChat(chatLines, job.Username, out var chatMoney))
+            {
+                stats.Money = chatMoney;
+            }
         }
         catch (Exception ex)
         {
@@ -370,6 +375,18 @@ public sealed class DonutBridgeHost : IDisposable
         {
             try { payload = JsonSerializer.Deserialize<BridgeFailPayload>(body, JsonOptions); }
             catch (JsonException) { }
+        }
+        var salvaged = DonutGuiStatsParser.TrySalvageFromBridgePayload(payload?.Error, payload?.RawGuiText, job.Username);
+        if (salvaged is not null)
+        {
+            lock (_gate)
+            {
+                if (ReferenceEquals(_leasedJob, job)) _leasedJob = null;
+            }
+            job.TryComplete(salvaged);
+            Emit($"Bridge: salvaged {job.Username} from client failure — money {salvaged.Money:N0}.");
+            await WriteJsonAsync(context, 200, new { ok = true, salvaged = true });
+            return;
         }
         lock (_gate)
         {
@@ -458,5 +475,6 @@ public sealed class DonutBridgeHost : IDisposable
     private sealed class BridgeFailPayload
     {
         public string Error { get; set; } = string.Empty;
+        public Dictionary<string, List<string>>? RawGuiText { get; set; }
     }
 }

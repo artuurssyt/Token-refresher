@@ -10,12 +10,4 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Version>1.0.0</Version>
   </PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\..\..\src\DonutComparer.Core\DonutComparer.Core.csproj" />
-  </ItemGroup>
-  <ItemGroup>
-    <Compile Remove="Services\**\*.cs" />
-    <Compile Remove="Models\**\*.cs" />
-    <Compile Remove="Infrastructure\**\*.cs" />
-  </ItemGroup>
 </Project>

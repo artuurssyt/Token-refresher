@@ -1,8 +1,8 @@
 using System.Drawing;
 
-using DonutComparer.Core.Infrastructure;
-using DonutComparer.Core.Models;
-using DonutComparer.Core.Services;
+using DonutHypixelPlayerComparer.Infrastructure;
+using DonutHypixelPlayerComparer.Models;
+using DonutHypixelPlayerComparer.Services;
 namespace DonutHypixelPlayerComparer.UI;
 
 public sealed partial class MainForm
@@ -188,7 +188,7 @@ public sealed partial class MainForm
             DefaultCellStyle = format is null ? new DataGridViewCellStyle() : new DataGridViewCellStyle { Format = format }
         };
 
-    private void UpdateBridgeStatus(DonutComparer.Core.Services.DonutBridgeStatus? status)
+    private void UpdateBridgeStatus(DonutHypixelPlayerComparer.Services.DonutBridgeStatus? status)
     {
         if (_bridgeStatus is null) return;
         if (status is null || !status.Active)

@@ -29,6 +29,8 @@ public sealed class AppSettings
     public string HttpProxyUsername { get; set; } = string.Empty;
     [JsonIgnore] public string HttpProxyPassword { get; set; } = string.Empty;
     public bool DonutBridgeEnabled { get; set; } = true;
+    /// <summary>When true, Donut stats come only from the in-game bridge — the Donut API is skipped.</summary>
+    public bool DonutBridgeOnly { get; set; } = true;
     public int DonutBridgePort { get; set; } = 47891;
     public int DonutBridgeJobTimeoutSeconds { get; set; } = 60;
     public string DonutBridgeCommandTemplate { get; set; } = "/bal {username}";

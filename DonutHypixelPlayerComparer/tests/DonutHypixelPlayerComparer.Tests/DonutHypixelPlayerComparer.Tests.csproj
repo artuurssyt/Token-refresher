@@ -2,10 +2,11 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="..\..\..\src\DonutComparer.Core\DonutComparer.Core.csproj" />
+    <ProjectReference Include="..\..\src\DonutHypixelPlayerComparer\DonutHypixelPlayerComparer.csproj" />
   </ItemGroup>
 </Project>

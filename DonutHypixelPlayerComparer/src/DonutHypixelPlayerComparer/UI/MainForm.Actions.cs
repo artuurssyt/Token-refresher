@@ -3,9 +3,9 @@ using System.ComponentModel;
 
 
 
-using DonutComparer.Core.Infrastructure;
-using DonutComparer.Core.Models;
-using DonutComparer.Core.Services;
+using DonutHypixelPlayerComparer.Infrastructure;
+using DonutHypixelPlayerComparer.Models;
+using DonutHypixelPlayerComparer.Services;
 namespace DonutHypixelPlayerComparer.UI;
 
 public sealed partial class MainForm

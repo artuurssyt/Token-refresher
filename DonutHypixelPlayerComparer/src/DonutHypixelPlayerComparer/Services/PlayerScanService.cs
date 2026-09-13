@@ -36,10 +36,10 @@ public sealed class PlayerScanService : IDisposable
     public DonutBridgeStatus? BridgeStatus => _bridge?.Status;
 
     /// <summary>
-    /// The API is tried first when a key exists, but the bridge stays armed so a flaky or empty API
-    /// response falls through to the in-game lookup instead of losing the player.
+    /// The API is tried first when a key exists and bridge-only mode is off. The bridge stays armed
+    /// so a flaky or empty API response falls through to the in-game lookup instead of losing the player.
     /// </summary>
-    private bool ApiFirst => _donut.IsConfigured && Volatile.Read(ref _apiAbandoned) == 0;
+    private bool ApiFirst => _donut.IsConfigured && !_settings.DonutBridgeOnly && Volatile.Read(ref _apiAbandoned) == 0;
 
     public async Task<IReadOnlyList<PlayerScanResult>> ScanAsync(IReadOnlyList<string> usernames,
         IProgress<ScanProgress>? progress, CancellationToken token)
@@ -48,9 +48,12 @@ public sealed class PlayerScanService : IDisposable
         var completed = 0;
         Volatile.Write(ref _apiAbandoned, 0);
         Volatile.Write(ref _consecutiveApiFailures, 0);
-        if (_settings.DonutBridgeEnabled && _donut.IsConfigured)
+        if (_settings.DonutBridgeEnabled && ApiFirst)
             progress?.Report(new ScanProgress(0, usernames.Count,
                 "Donut stats: trying the official API first, falling back to the in-game bridge whenever it fails."));
+        else if (_settings.DonutBridgeEnabled && _settings.DonutBridgeOnly)
+            progress?.Report(new ScanProgress(0, usernames.Count,
+                "Donut stats: bridge-only mode — using in-game /bal lookups (Donut API skipped)."));
         if (_settings.DonutBridgeEnabled)
         {
             try
@@ -99,7 +102,7 @@ public sealed class PlayerScanService : IDisposable
         var results = new ConcurrentBag<PlayerScanResult>();
         // Only bridge calls have to be serial, and _bridgeGate already enforces that, so an API-first
         // scan keeps its parallelism instead of being slowed to one player at a time.
-        var concurrency = _bridge is not null && !_donut.IsConfigured ? 1 : _settings.Concurrency;
+        var concurrency = _bridge is not null && (!_donut.IsConfigured || _settings.DonutBridgeOnly) ? 1 : _settings.Concurrency;
         using var gate = new SemaphoreSlim(concurrency);
         try
         {
@@ -166,14 +169,19 @@ public sealed class PlayerScanService : IDisposable
             }
 
             if (!_settings.DonutBridgeEnabled && !_donut.IsConfigured && !_hypixel.IsConfigured)
-                errors.Add("Add a Hypixel API key and/or a DonutSMP API key (run /api in game) in Settings.");
-            else if (!_hypixel.IsConfigured && result.Donut is null)
+                errors.Add("Add a Hypixel API key and/or enable the Donut bridge in Settings.");
+            else if (!_hypixel.IsConfigured && result.Donut is null && !_settings.DonutBridgeEnabled)
                 errors.Add("Configure a Hypixel API key in Settings for SkyBlock lookups.");
             // Drop API noise when bridge/API already filled Donut — Donut-only scans are Complete.
             if (result.Donut is not null)
             {
                 errors.RemoveAll(e => e.StartsWith("DonutSMP API:", StringComparison.Ordinal)
-                                      || e.StartsWith("Configure a Hypixel API key", StringComparison.Ordinal));
+                                      || e.StartsWith("Configure a Hypixel API key", StringComparison.Ordinal)
+                                      || e.StartsWith("Hypixel:", StringComparison.Ordinal));
+            }
+            else if (_settings.DonutBridgeOnly)
+            {
+                errors.RemoveAll(e => e.StartsWith("DonutSMP API:", StringComparison.Ordinal));
             }
             result.Error = string.Join(" | ", errors);
             result.Status = errors.Count == 0 ? "Complete" :

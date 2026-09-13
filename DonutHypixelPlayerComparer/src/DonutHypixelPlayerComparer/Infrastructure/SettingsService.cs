@@ -62,7 +62,11 @@ public sealed class SettingsService
         settings.DonutBridgePort = Math.Clamp(settings.DonutBridgePort, 1024, 65535);
         settings.DonutBridgeJobTimeoutSeconds = Math.Clamp(settings.DonutBridgeJobTimeoutSeconds, 15, 300);
         settings.DonutBridgeCommandDelayMs = Math.Clamp(settings.DonutBridgeCommandDelayMs, 250, 10_000);
-        if (string.IsNullOrWhiteSpace(settings.DonutBridgeCommandTemplate))
+        if (string.IsNullOrWhiteSpace(settings.DonutBridgeCommandTemplate)
+            || settings.DonutBridgeCommandTemplate.Trim().Equals("/stats {username}", StringComparison.OrdinalIgnoreCase)
+            || settings.DonutBridgeCommandTemplate.Trim().Equals("/playerstats {username}", StringComparison.OrdinalIgnoreCase))
+        {
             settings.DonutBridgeCommandTemplate = "/bal {username}";
+        }
     }
 }
