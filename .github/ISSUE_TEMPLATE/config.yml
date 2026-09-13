@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: README — download, formats, tabs, FAQ
+    url: https://github.com/artuurssyt/Token-refresher#localts-account-manager
+    about: Try the README first. It covers the exe, token formats, each tab, and where data is stored.
