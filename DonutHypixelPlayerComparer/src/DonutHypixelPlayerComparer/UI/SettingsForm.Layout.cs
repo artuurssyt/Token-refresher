@@ -71,6 +71,7 @@ public sealed partial class SettingsForm
         var page = Page("Donut bridge");
         var table = FormTable();
         AddWideRow(table, _donutBridgeEnabled);
+        AddWideRow(table, _donutBridgeOnly);
         AddRow(table, "Bridge port", _donutBridgePort);
         AddRow(table, "Job timeout (seconds)", _donutBridgeTimeout);
         AddRow(table, "Command template", _donutBridgeCommand);
@@ -79,10 +80,12 @@ public sealed partial class SettingsForm
             "This is the normal Donut path: no /api key needed. While scanning, the app listens on 127.0.0.1 and "
             + "queues usernames for PlayerCheckerBridge in artuurssclient (join DonutSMP, enable that Misc module). "
             + "Default command is /bal {username} (chat balance). Switch to /stats {username} only if you want the "
-            + "full GUI profile. DonutSMP rules prohibit macros/scripts, so automating chat commands carries ban risk."));
+            + "full GUI profile. DonutSMP rules prohibit macros/scripts, so automating chat commands carries ban risk. "
+            + "Clear \"Bridge only\" to let a configured DonutSMP API key answer first, with the bridge kept as fallback."));
         page.Controls.Add(table);
         StyleControls(table);
         ArtuurssTheme.ApplyCheckBox(_donutBridgeEnabled);
+        ArtuurssTheme.ApplyCheckBox(_donutBridgeOnly);
         return page;
     }
 

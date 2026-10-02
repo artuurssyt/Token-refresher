@@ -24,6 +24,7 @@ public sealed partial class SettingsForm : Form
     private readonly CheckBox _museum = new() { Text = "Include museum assets", AutoSize = true };
     private readonly CheckBox _playerAuctions = new() { Text = "Include active player auctions", AutoSize = true };
     private readonly CheckBox _donutBridgeEnabled = new() { Text = "Use Donut client bridge (artuurssclient in-game lookup)", AutoSize = true };
+    private readonly CheckBox _donutBridgeOnly = new() { Text = "Bridge only — never call the DonutSMP API for stats", AutoSize = true };
     private readonly NumericUpDown _donutBridgePort = Number(1024, 65535);
     private readonly NumericUpDown _donutBridgeTimeout = Number(15, 300);
     private readonly TextBox _donutBridgeCommand = new() { Dock = DockStyle.Fill };
@@ -58,6 +59,7 @@ public sealed partial class SettingsForm : Form
         _museum.Checked = _settings.IncludeMuseum;
         _playerAuctions.Checked = _settings.IncludePlayerAuctions;
         _donutBridgeEnabled.Checked = _settings.DonutBridgeEnabled;
+        _donutBridgeOnly.Checked = _settings.DonutBridgeOnly;
         SetNumeric(_donutBridgePort, _settings.DonutBridgePort);
         SetNumeric(_donutBridgeTimeout, _settings.DonutBridgeJobTimeoutSeconds);
         _donutBridgeCommand.Text = _settings.DonutBridgeCommandTemplate;
@@ -89,6 +91,7 @@ public sealed partial class SettingsForm : Form
         _settings.IncludeMuseum = _museum.Checked;
         _settings.IncludePlayerAuctions = _playerAuctions.Checked;
         _settings.DonutBridgeEnabled = _donutBridgeEnabled.Checked;
+        _settings.DonutBridgeOnly = _donutBridgeOnly.Checked;
         _settings.DonutBridgePort = (int)_donutBridgePort.Value;
         _settings.DonutBridgeJobTimeoutSeconds = (int)_donutBridgeTimeout.Value;
         _settings.DonutBridgeCommandTemplate = _donutBridgeCommand.Text.Trim();

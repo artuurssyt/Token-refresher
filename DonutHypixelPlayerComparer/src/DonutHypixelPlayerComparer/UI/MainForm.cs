@@ -34,7 +34,12 @@ public sealed partial class MainForm : Form
     {
         BuildLayout();
         Shown += MainFormShown;
-        FormClosing += (_, _) => _scanCancellation?.Cancel();
+        FormClosing += (_, _) =>
+        {
+            // Cancel can race a scan that is already tearing itself down.
+            try { _scanCancellation?.Cancel(); }
+            catch (ObjectDisposedException) { }
+        };
     }
 
     private void MainFormShown(object? sender, EventArgs e)

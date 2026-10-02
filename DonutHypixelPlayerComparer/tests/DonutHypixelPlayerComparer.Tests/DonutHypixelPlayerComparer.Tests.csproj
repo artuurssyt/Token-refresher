@@ -5,8 +5,17 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <IsTestProject>true</IsTestProject>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\DonutHypixelPlayerComparer\DonutHypixelPlayerComparer.csproj" />
   </ItemGroup>
+  <!--
+    The suite is a self-contained console harness, not a VSTest project. `dotnet test` would
+    otherwise exit 0 without running a single assertion, which is indistinguishable from a green
+    run. Routing the VSTest target at the harness makes the documented command real.
+  -->
+  <Target Name="VSTest" DependsOnTargets="Build">
+    <Exec Command="dotnet &quot;$(TargetPath)&quot;" />
+  </Target>
 </Project>

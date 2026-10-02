@@ -1,7 +1,5 @@
 using System.ComponentModel;
-
-
-
+using System.Globalization;
 
 using DonutHypixelPlayerComparer.Infrastructure;
 using DonutHypixelPlayerComparer.Models;
@@ -10,9 +8,19 @@ namespace DonutHypixelPlayerComparer.UI;
 
 public sealed partial class MainForm
 {
+    /// <summary>
+    /// A reset settings file or undecryptable key store has to be announced; otherwise the app just
+    /// appears to have forgotten the user's configuration.
+    /// </summary>
+    private void WarnIfSettingsUnreadable()
+    {
+        if (_settingsService.LastLoadWarning is { } warning) AppendLog(warning);
+    }
+
     private void SettingsClicked(object? sender, EventArgs e)
     {
         var settings = _settingsService.Load();
+        WarnIfSettingsUnreadable();
         using var dialog = new SettingsForm(settings);
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
         try
@@ -57,6 +65,7 @@ public sealed partial class MainForm
             return;
         }
         var settings = _settingsService.Load();
+        WarnIfSettingsUnreadable();
         if (string.IsNullOrWhiteSpace(settings.HypixelApiKey))
         {
             MessageBox.Show(this,
@@ -65,8 +74,17 @@ public sealed partial class MainForm
             using var settingsDialog = new SettingsForm(settings);
             if (settingsDialog.ShowDialog(this) == DialogResult.OK)
             {
-                _settingsService.Save(settings);
-                settings = _settingsService.Load();
+                // A failure here must not escape into the async void click handler.
+                try
+                {
+                    _settingsService.Save(settings);
+                    settings = _settingsService.Load();
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, ex.Message, "Could not save settings",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
             }
         }
         // Only refuse to start when nothing at all could be looked up.
@@ -81,7 +99,7 @@ public sealed partial class MainForm
         }
         if (string.IsNullOrWhiteSpace(settings.HypixelApiKey))
             AppendLog("No Hypixel API key set — running a DonutSMP-only scan.");
-        if (settings.DonutBridgeEnabled && string.IsNullOrWhiteSpace(settings.DonutApiKey))
+        if (settings.DonutBridgeEnabled && (string.IsNullOrWhiteSpace(settings.DonutApiKey) || settings.DonutBridgeOnly))
             AppendLog("Donut stats will be fetched via the Minecraft client bridge. Join DonutSMP and enable PlayerCheckerBridge.");
         else if (settings.DonutBridgeEnabled)
             AppendLog("Donut stats will use the official API first and fall back to the client bridge. "
@@ -104,6 +122,9 @@ public sealed partial class MainForm
         _scanCancellation = new CancellationTokenSource();
         var progress = new Progress<ScanProgress>(update =>
         {
+            // Closing the window mid-scan leaves in-flight progress reports pointing at disposed
+            // controls, and touching one of those throws on the UI thread.
+            if (IsDisposed || Disposing || !IsHandleCreated) return;
             _status.Text = update.Message;
             _progress.Value = Math.Clamp(update.Completed, _progress.Minimum, _progress.Maximum);
             UpdateBridgeStatus(update.BridgeStatus);
@@ -118,16 +139,19 @@ public sealed partial class MainForm
         {
             using var scanner = new PlayerScanService(settings);
             await scanner.ScanAsync(parsed.Usernames, progress, _scanCancellation.Token);
+            if (IsDisposed || Disposing) return;
             _status.Text = $"Complete — {_results.Count} player(s)";
             AppendLog("Scan complete. Double-click any result for the valuation breakdown.");
         }
         catch (OperationCanceledException)
         {
+            if (IsDisposed || Disposing) return;
             _status.Text = $"Stopped — {_results.Count} result(s) retained";
             AppendLog("Scan stopped by user. Completed rows were retained.");
         }
         catch (Exception ex)
         {
+            if (IsDisposed || Disposing) return;
             _status.Text = "Scan failed";
             AppendLog("Fatal scan error: " + ex.Message);
             MessageBox.Show(this, ex.Message, "Scan failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -136,9 +160,12 @@ public sealed partial class MainForm
         {
             _scanCancellation.Dispose();
             _scanCancellation = null;
-            ToggleScanning(false);
-            _exportButton.Enabled = _results.Count > 0;
-            UpdateBridgeStatus(null);
+            if (!IsDisposed && !Disposing)
+            {
+                ToggleScanning(false);
+                _exportButton.Enabled = _results.Count > 0;
+                UpdateBridgeStatus(null);
+            }
         }
     }
 
@@ -167,25 +194,41 @@ public sealed partial class MainForm
         try
         {
             host = new DonutBridgeHost(settings);
-            host.Diagnostic += message => BeginInvoke(() =>
+            var diagnosticHost = host;
+            host.Diagnostic += message =>
             {
-                AppendLog(message);
-                UpdateBridgeStatus(host?.Status);
-            });
+                // Diagnostics arrive on bridge threads; marshalling to a window that is closing
+                // throws, and this is only logging.
+                if (IsDisposed || Disposing || !IsHandleCreated) return;
+                try
+                {
+                    BeginInvoke(() =>
+                    {
+                        if (IsDisposed || Disposing) return;
+                        AppendLog(message);
+                        UpdateBridgeStatus(diagnosticHost.Status);
+                    });
+                }
+                catch (ObjectDisposedException) { }
+                catch (InvalidOperationException) { }
+            };
             host.Start();
             AppendLog($"Bridge test started. Join DonutSMP, enable PlayerCheckerBridge, and it will run /bal {username} (or your configured template).");
             var stats = await host.WaitForStatsAsync(username, _scanCancellation.Token);
+            if (IsDisposed || Disposing) return;
             AppendLog($"Bridge test succeeded for {username}: money {stats?.Money:N0}, shards {stats?.Shards:N0}, "
                       + $"kills {stats?.Kills:N0}, deaths {stats?.Deaths:N0}, playtime {stats?.PlaytimeSeconds / 3600}h.");
             _status.Text = "Bridge test succeeded";
         }
         catch (OperationCanceledException)
         {
+            if (IsDisposed || Disposing) return;
             AppendLog("Bridge test stopped.");
             _status.Text = "Bridge test stopped";
         }
         catch (Exception ex)
         {
+            if (IsDisposed || Disposing) return;
             AppendLog("Bridge test failed: " + ex.Message);
             AppendLog("Full request log: " + AppPaths.BridgeLogFile);
             _status.Text = "Bridge test failed";
@@ -195,8 +238,11 @@ public sealed partial class MainForm
             host?.Dispose();
             _scanCancellation?.Dispose();
             _scanCancellation = null;
-            ToggleScanning(false);
-            UpdateBridgeStatus(null);
+            if (!IsDisposed && !Disposing)
+            {
+                ToggleScanning(false);
+                UpdateBridgeStatus(null);
+            }
         }
     }
 
@@ -270,9 +316,21 @@ public sealed partial class MainForm
         _usernames.ReadOnly = scanning;
     }
 
+    /// <summary>Bridge diagnostics are chatty, so the pane is trimmed instead of growing all scan.</summary>
+    private const int MaxLogCharacters = 400_000;
+
     private void AppendLog(string message)
     {
-        _log.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}");
+        if (_log.IsDisposed) return;
+        if (_log.TextLength > MaxLogCharacters)
+        {
+            var keep = _log.Text[^(MaxLogCharacters / 2)..];
+            var firstLine = keep.IndexOf('\n');
+            _log.Text = "… earlier log trimmed …" + Environment.NewLine
+                        + (firstLine >= 0 ? keep[(firstLine + 1)..] : keep);
+        }
+        _log.AppendText(
+            $"[{DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture)}] {message}{Environment.NewLine}");
         _log.SelectionStart = _log.TextLength;
         _log.ScrollToCaret();
     }

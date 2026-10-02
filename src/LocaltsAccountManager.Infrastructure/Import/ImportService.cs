@@ -1,3 +1,4 @@
+using System.Globalization;
 using LocaltsAccountManager.Core.Configuration;
 using LocaltsAccountManager.Core.Enums;
 using LocaltsAccountManager.Core.Interfaces;
@@ -72,6 +73,12 @@ public sealed class ImportService : IImportService
             try
             {
                 detail = await _localtsService.FetchOrderAsync(order.Id, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Must not be treated as a skipped order: swallowing it turned Cancel into
+                // "silently skip every remaining order" and still reported a successful import.
+                throw;
             }
             catch (Exception)
             {
@@ -197,7 +204,9 @@ public sealed class ImportService : IImportService
     internal BatchRecord CreateLocaltsImportBatch(string username) =>
         new()
         {
-            Name = $"Localts import {username} {DateTime.Now:yyyy-MM-dd HH:mm}",
+            Name = string.Create(
+                CultureInfo.InvariantCulture,
+                $"Localts import {username} {DateTime.Now:yyyy-MM-dd HH:mm}"),
             SourceFilePath = "localts://orders",
             OutputDirectory = ExportDirectoryResolver.Resolve(_settingsStore),
             ConcurrencyLimit = _settingsStore.Load().DefaultConcurrency,

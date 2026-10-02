@@ -67,7 +67,8 @@ public sealed class MicrosoftAuthAdapter : IMicrosoftAuthAdapter
 
             using var response = await http.SendAsync(request, cancellationToken).ConfigureAwait(false);
             var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            _logger.LogOperation("Microsoft", "LiveComRefreshToken", (int)response.StatusCode, response.Headers.RetryAfter?.Delta, null);
+            var retryAfter = RetryAfterReader.Read(response);
+            _logger.LogOperation("Microsoft", "LiveComRefreshToken", (int)response.StatusCode, retryAfter, null);
 
             if ((int)response.StatusCode == 429)
             {
@@ -77,7 +78,7 @@ public sealed class MicrosoftAuthAdapter : IMicrosoftAuthAdapter
                     FailureStage = FailureStage.Authentication,
                     ErrorCategory = ErrorCategory.RateLimited,
                     ServiceErrorDetail = "Microsoft token endpoint returned HTTP 429.",
-                    RetryAfter = response.Headers.RetryAfter?.Delta,
+                    RetryAfter = retryAfter,
                     IsRetryable = true
                 };
             }
@@ -104,12 +105,21 @@ public sealed class MicrosoftAuthAdapter : IMicrosoftAuthAdapter
                     ? desc.GetString()
                     : null;
 
+                // Transient OAuth errors were all falling into CredentialRejected, which is both
+                // non-retryable and (for the pool) a reason to discard the refresh token. Only
+                // errors that really mean "this grant is dead" may be treated that way.
                 var category = error switch
                 {
-                    "invalid_grant" => ErrorCategory.CredentialRejected,
-                    "interaction_required" => ErrorCategory.UserInteractionRequired,
-                    _ => ErrorCategory.CredentialRejected
+                    "invalid_grant" or "expired_grant" or "invalid_request" or "unauthorized_client"
+                        => ErrorCategory.CredentialRejected,
+                    "interaction_required" or "consent_required" or "authorization_pending"
+                        => ErrorCategory.UserInteractionRequired,
+                    "slow_down" => ErrorCategory.RateLimited,
+                    "server_error" or "temporarily_unavailable" => ErrorCategory.MicrosoftServiceError,
+                    _ => ErrorCategory.MicrosoftServiceError
                 };
+
+                var retryable = category is ErrorCategory.RateLimited or ErrorCategory.MicrosoftServiceError;
 
                 return new AuthResult
                 {
@@ -118,8 +128,9 @@ public sealed class MicrosoftAuthAdapter : IMicrosoftAuthAdapter
                     ErrorCategory = category,
                     OAuthErrorCode = error,
                     ServiceErrorDetail = description ?? error,
+                    RetryAfter = category == ErrorCategory.RateLimited ? retryAfter : null,
                     IsErrorCauseConfirmed = category is ErrorCategory.CredentialRejected or ErrorCategory.UserInteractionRequired,
-                    IsRetryable = false
+                    IsRetryable = retryable
                 };
             }
 
