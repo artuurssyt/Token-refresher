@@ -6,18 +6,38 @@ You do not need to message the owner to use this. Download or build, then follow
 
 ## Download
 
-**[Download LocaltsAccountManager.App.exe (Windows x64)](https://github.com/artuurssyt/Token-refresher/releases/latest/download/LocaltsAccountManager.App.exe)**
+Pick your platform. These are **two separate GitHub Releases** (not one release with two files). Binaries are not in the git repo.
 
-Also listed on the **[Releases](https://github.com/artuurssyt/Token-refresher/releases/latest)** page. The `.exe` is not in the git repo (it used to be ~148 MB and broke `git push`).
+### Windows (native)
+
+**[Localts Account Manager v1.1.0 — Windows](https://github.com/artuurssyt/Token-refresher/releases/tag/v1.1.0-windows)**  
+**[Download `LocaltsAccountManager.App.exe`](https://github.com/artuurssyt/Token-refresher/releases/download/v1.1.0-windows/LocaltsAccountManager.App.exe)**
+
+Windows 10 or 11, 64-bit.
 
 1. Install the **[.NET 8 Desktop Runtime (Windows x64)](https://dotnet.microsoft.com/en-us/download/dotnet/8.0)** if Windows says the app cannot start or a runtime is missing. You want **.NET Desktop Runtime 8**, not the SDK, unless you plan to build from source.
 2. Save the exe somewhere writable (for example `Downloads` or a folder you create). Exports are written to an `exports\` folder next to that exe.
-3. Double-click `LocaltsAccountManager.App.exe`.
-4. If **SmartScreen** or antivirus blocks it, that is normal for an unsigned desktop app you built or downloaded from GitHub. Use **More info → Run anyway** only if you trust this repo. Add an exclusion if your AV quarantines the file.
+3. Double-click `LocaltsAccountManager.App.exe`. Tokens do **not** refresh on first launch.
+4. If **SmartScreen** or antivirus blocks it, that is normal for an unsigned desktop app. Use **More info → Run anyway** only if you trust this repo.
 
-If the Releases page has no attached exe yet, skip to [Build from source](#build-from-source).
+Older Windows build: **[v1.0.0](https://github.com/artuurssyt/Token-refresher/releases/tag/v1.0.0)**.
 
-**Requirements:** Windows 10 or 11, 64-bit.
+### Linux (Arch) — Wine, not a native GUI
+
+**[Localts Account Manager v1.1.0 — Linux (Arch)](https://github.com/artuurssyt/Token-refresher/releases/tag/v1.1.0-linux-arch)**  
+**[Download `localts-account-manager-linux-arch.tar.gz`](https://github.com/artuurssyt/Token-refresher/releases/download/v1.1.0-linux-arch/localts-account-manager-linux-arch.tar.gz)**
+
+There is **no native GTK/Qt/Wayland WPF port**. Arch runs the same Windows exe under Wine. Arch `dotnet-runtime` will not start this app.
+
+Copy-paste install: see **[docs/ARCH.md](docs/ARCH.md)**. Short version:
+
+```bash
+sudo pacman -S wine winetricks curl
+# download + extract the Arch tarball, then:
+chmod +x localts-account-manager install-dotnet-desktop-runtime.sh
+./install-dotnet-desktop-runtime.sh
+./localts-account-manager
+```
 
 ## Build from source
 
@@ -48,6 +68,8 @@ dotnet publish src\LocaltsAccountManager.App\LocaltsAccountManager.App.csproj `
 ```
 
 Do not commit `publish\`, `Done builds\`, or `exports\`. They are gitignored.
+
+Do not publish the WPF app with `-r linux-x64` and ship it. The SDK may emit a Linux host, but it still requires `Microsoft.WindowsDesktop.App` and will not run on Arch. Use the [Wine/Arch release](https://github.com/artuurssyt/Token-refresher/releases/tag/v1.1.0-linux-arch) instead.
 
 **Solution:** `LocaltsAccountManager.sln`
 
@@ -248,7 +270,7 @@ DPAPI is per Windows user/machine. The database may copy but secrets will not de
 No.
 
 **There is no exe on GitHub / git clone has no `Done builds`**  
-Binaries are gitignored (GitHub file-size limits). Use [Releases](https://github.com/artuurssyt/Token-refresher/releases/latest) or [Build from source](#build-from-source).
+Binaries are gitignored (GitHub file-size limits). Use the [Windows release](https://github.com/artuurssyt/Token-refresher/releases/tag/v1.1.0-windows), the [Arch release](https://github.com/artuurssyt/Token-refresher/releases/tag/v1.1.0-linux-arch), or [Build from source](#build-from-source).
 
 **Antivirus says the exe is malware**  
 Common false positive on unsigned .NET single-file publishes. Check the hash against the Release asset you downloaded. Build from source if you do not want to trust a binary.
@@ -263,7 +285,7 @@ Yes. On the Accounts tab, Import TXT starts processing immediately. On the Batch
 Account refresh does not need Donut. For scans: join DonutSMP, enable PlayerCheckerBridge in artuurssclient on this PC, then Start scan. Hypixel/Donut API keys are optional extras on that tab.
 
 **Linux or macOS?**  
-No. This is a Windows WPF app (x64).
+macOS: no. Linux: not a native WPF port. **Arch is supported via Wine** — use the [Linux (Arch) release](https://github.com/artuurssyt/Token-refresher/releases/tag/v1.1.0-linux-arch) and [docs/ARCH.md](docs/ARCH.md). Arch `dotnet-runtime` / `wine-mono` cannot run this GUI. Other distros can follow the same Wine + Windows Desktop Runtime steps, but only Arch packaging (`PKGBUILD`, tarball) is published.
 
 **How do I update?**  
 Download the new exe from Releases (or publish again). Your library stays in `%LOCALAPPDATA%\LocaltsAccountManager\` as long as you are the same Windows user. You can delete the old exe.

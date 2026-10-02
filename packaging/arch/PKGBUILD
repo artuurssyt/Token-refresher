@@ -1,0 +1,54 @@
+# Maintainer: artuurssyt
+# Local package: extract the GitHub Arch tarball, then run `makepkg -si` from this directory.
+# This is a Wine wrapper around the Windows WPF build. There is no native GTK/Qt GUI.
+
+pkgname=localts-account-manager
+pkgver=1.1.0
+pkgrel=1
+pkgdesc="Microsoft/Minecraft account manager (Windows WPF app via Wine)"
+arch=('x86_64')
+url="https://github.com/artuurssyt/Token-refresher"
+license=('unknown')
+install=localts-account-manager.install
+depends=('wine')
+optdepends=(
+  'winetricks: install Arial and other Wine helpers for WPF text'
+  'wine-mono: Wine default; not a substitute for .NET 8 Desktop Runtime'
+  'curl: download the Windows Desktop Runtime installer'
+)
+source=(
+  "LocaltsAccountManager.App.exe"
+  "localts-account-manager"
+  "install-dotnet-desktop-runtime.sh"
+  "localts-account-manager.desktop"
+)
+# Filled in when the Windows single-file exe is published for this release.
+sha256sums=(
+  'EXE_SHA256_PLACEHOLDER'
+  'SKIP'
+  'SKIP'
+  'SKIP'
+)
+
+package() {
+  install -d "$pkgdir/usr/share/localts-account-manager"
+  install -Dm644 "$srcdir/LocaltsAccountManager.App.exe" \
+    "$pkgdir/usr/share/localts-account-manager/LocaltsAccountManager.App.exe"
+
+  install -Dm755 "$srcdir/localts-account-manager" \
+    "$pkgdir/usr/bin/localts-account-manager"
+  install -Dm755 "$srcdir/install-dotnet-desktop-runtime.sh" \
+    "$pkgdir/usr/bin/localts-account-manager-setup"
+
+  install -Dm644 "$srcdir/localts-account-manager.desktop" \
+    "$pkgdir/usr/share/applications/localts-account-manager.desktop"
+
+  if [[ -f "$startdir/README-ARCH.md" ]]; then
+    install -Dm644 "$startdir/README-ARCH.md" \
+      "$pkgdir/usr/share/doc/localts-account-manager/README-ARCH.md"
+  fi
+  if [[ -f "$startdir/SHA256SUMS" ]]; then
+    install -Dm644 "$startdir/SHA256SUMS" \
+      "$pkgdir/usr/share/doc/localts-account-manager/SHA256SUMS"
+  fi
+}

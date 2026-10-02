@@ -11,3 +11,10 @@
 *.png binary
 *.jpg binary
 *.webp binary
+
+# Arch packaging must stay LF or Wine/bash shebangs break on Linux.
+packaging/arch/PKGBUILD text eol=lf
+packaging/arch/*.sh text eol=lf
+packaging/arch/*.install text eol=lf
+packaging/arch/*.desktop text eol=lf
+packaging/arch/localts-account-manager text eol=lf

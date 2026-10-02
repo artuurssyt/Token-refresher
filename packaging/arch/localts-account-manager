@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Launch Localts Account Manager (Windows WPF) inside a dedicated Wine prefix.
+set -euo pipefail
+
+APP_NAME="Localts Account Manager"
+DATA_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/localts-account-manager"
+PREFIX="${WINEPREFIX:-$DATA_ROOT/wineprefix}"
+export WINEPREFIX="$PREFIX"
+export WINEARCH="${WINEARCH:-win64}"
+
+if [[ -f /usr/share/localts-account-manager/LocaltsAccountManager.App.exe ]]; then
+  EXE="/usr/share/localts-account-manager/LocaltsAccountManager.App.exe"
+else
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  EXE="$SCRIPT_DIR/LocaltsAccountManager.App.exe"
+fi
+
+if [[ ! -f "$EXE" ]]; then
+  echo "$APP_NAME: cannot find LocaltsAccountManager.App.exe" >&2
+  echo "Extract the Arch release tarball, or install with makepkg -si." >&2
+  exit 1
+fi
+
+if ! command -v wine >/dev/null 2>&1; then
+  echo "$APP_NAME: wine is not installed." >&2
+  echo "On Arch: sudo pacman -S wine" >&2
+  exit 1
+fi
+
+if [[ ! -d "$WINEPREFIX" ]]; then
+  echo "$APP_NAME: creating Wine prefix at $WINEPREFIX"
+  mkdir -p "$WINEPREFIX"
+  wineboot --init
+fi
+
+echo "$APP_NAME: this is the Windows build running under Wine (not a native GTK/Qt GUI)."
+echo "Secrets live in the Wine prefix, not in ~/.local/share/LocaltsAccountManager."
+exec wine "$EXE" "$@"

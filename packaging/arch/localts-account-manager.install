@@ -1,0 +1,15 @@
+post_install() {
+  echo "Localts Account Manager is a Windows WPF app. Arch runs it under Wine."
+  echo "There is no native Wayland/GTK/Qt GUI."
+  echo
+  echo "1. Install the Windows .NET 8 Desktop Runtime into the Wine prefix:"
+  echo "     localts-account-manager-setup"
+  echo "2. Launch:"
+  echo "     localts-account-manager"
+  echo
+  echo "Do not install Arch dotnet-runtime expecting the GUI to start."
+}
+
+post_upgrade() {
+  post_install
+}

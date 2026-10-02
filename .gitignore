@@ -33,8 +33,9 @@ phase0_report.md
 meteor_sessions*.txt
 session_lines*.txt
 
-# Local investigation dumps (not needed to build)
-localts/
+# Local investigation dumps (not needed to build). Anchor at repo root so
+# src/LocaltsAccountManager.Infrastructure/Localts/ (the Localts API client) is tracked.
+/localts/
 README.zip
 src/_AuthSmoke/
 src/_DbProbe/
