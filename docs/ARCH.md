@@ -108,3 +108,8 @@ rm -rf ~/.local/share/localts-account-manager/wineprefix
 ## Verify the exe hash
 
 The tarball includes `SHA256SUMS`. Compare it to the Windows release asset; they are the same framework-dependent `LocaltsAccountManager.App.exe`.
+
+```
+SHA-256  LocaltsAccountManager.App.exe
+8dbb07049d0dc78f1e03302fae2356e269b5b3e437ee78ec7c4329836e491f66
+```

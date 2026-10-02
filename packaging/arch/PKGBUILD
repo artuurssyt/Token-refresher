@@ -24,7 +24,7 @@ source=(
 )
 # Filled in when the Windows single-file exe is published for this release.
 sha256sums=(
-  'EXE_SHA256_PLACEHOLDER'
+  '8dbb07049d0dc78f1e03302fae2356e269b5b3e437ee78ec7c4329836e491f66'
   'SKIP'
   'SKIP'
   'SKIP'
