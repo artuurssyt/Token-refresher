@@ -1,6 +1,4 @@
 using System.Collections.ObjectModel;
-using System.IO;
-using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using DonutComparer.Core.Infrastructure;
@@ -8,15 +6,17 @@ using DonutComparer.Core.Models;
 using DonutComparer.Core.Services;
 using LocaltsAccountManager.Core.Interfaces;
 using LocaltsAccountManager.Core.Models;
-using Microsoft.Win32;
 
-namespace LocaltsAccountManager.App.ViewModels;
+namespace LocaltsAccountManager.ViewModels;
 
 public partial class DonutViewModel : ObservableObject
 {
     private readonly IAccountRepository _accountRepository;
     private readonly IBatchRepository _batchRepository;
     private readonly ISecureCredentialStore _credentialStore;
+    private readonly IUiDialogs _dialogs;
+    private readonly IUiDispatcher _ui;
+    private readonly IClipboardService _clipboard;
     private readonly SettingsService _settingsService = new();
     private CancellationTokenSource? _scanCts;
     private PlayerScanService? _scanService;
@@ -24,11 +24,17 @@ public partial class DonutViewModel : ObservableObject
     public DonutViewModel(
         IAccountRepository accountRepository,
         IBatchRepository batchRepository,
-        ISecureCredentialStore credentialStore)
+        ISecureCredentialStore credentialStore,
+        IUiDialogs dialogs,
+        IUiDispatcher ui,
+        IClipboardService clipboard)
     {
         _accountRepository = accountRepository;
         _batchRepository = batchRepository;
         _credentialStore = credentialStore;
+        _dialogs = dialogs;
+        _ui = ui;
+        _clipboard = clipboard;
         ReloadSettingsSummary();
     }
 
@@ -138,7 +144,7 @@ public partial class DonutViewModel : ObservableObject
         _scanService = new PlayerScanService(settings);
         var progress = new Progress<ScanProgress>(p =>
         {
-            Application.Current.Dispatcher.Invoke(() =>
+            _ui.Post(() =>
             {
                 ScanCompleted = p.Completed;
                 ScanTotal = p.Total;
@@ -170,7 +176,7 @@ public partial class DonutViewModel : ObservableObject
         try
         {
             var results = await _scanService.ScanAsync(usernames, progress, _scanCts.Token).ConfigureAwait(true);
-            await Application.Current.Dispatcher.InvokeAsync(() =>
+            await _ui.InvokeAsync(() =>
             {
                 Results.Clear();
                 foreach (var row in results)
@@ -180,7 +186,7 @@ public partial class DonutViewModel : ObservableObject
 
                 StatusMessage = $"Scan finished — {results.Count(r => r.Donut is not null)} with Donut stats, "
                                + $"{results.Count(r => r.HasError)} with errors.";
-            });
+            }).ConfigureAwait(true);
         }
         catch (OperationCanceledException)
         {
@@ -188,8 +194,7 @@ public partial class DonutViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            await Application.Current.Dispatcher.InvokeAsync(() =>
-                MessageBox.Show(ex.Message, "Donut scan failed", MessageBoxButton.OK, MessageBoxImage.Error));
+            await _dialogs.ErrorAsync(ex.Message, "Donut scan failed").ConfigureAwait(true);
         }
         finally
         {
@@ -197,11 +202,11 @@ public partial class DonutViewModel : ObservableObject
             _scanService = null;
             _scanCts?.Dispose();
             _scanCts = null;
-            await Application.Current.Dispatcher.InvokeAsync(() =>
+            await _ui.InvokeAsync(() =>
             {
                 IsScanning = false;
                 NotifyScanCommands();
-            });
+            }).ConfigureAwait(true);
         }
     }
 
@@ -230,7 +235,7 @@ public partial class DonutViewModel : ObservableObject
 
         _settingsService.Save(settings);
         ReloadSettingsSummary();
-        StatusMessage = "Donut/Hypixel API keys saved (DPAPI). Join DonutSMP → enable PlayerCheckerBridge → Start scan.";
+        StatusMessage = "Donut/Hypixel API keys saved (encrypted local store). Join DonutSMP → enable PlayerCheckerBridge → Start scan.";
     }
 
     [RelayCommand]
@@ -242,22 +247,23 @@ public partial class DonutViewModel : ObservableObject
             return;
         }
 
-        var dialog = new SaveFileDialog
-        {
-            Filter = "CSV (*.csv)|*.csv",
-            FileName = $"donut_scan_{DateTime.Now:yyyyMMdd_HHmmss}.csv"
-        };
-        if (dialog.ShowDialog() != true)
+        var path = await _dialogs.PickSaveFileAsync(
+            "Save Donut scan CSV",
+            "CSV",
+            $"donut_scan_{DateTime.Now:yyyyMMdd_HHmmss}.csv",
+            null,
+            "csv").ConfigureAwait(true);
+        if (path is null)
         {
             return;
         }
 
-        await ExportService.ExportCsvAsync(dialog.FileName, Results.ToList(), CancellationToken.None).ConfigureAwait(true);
-        StatusMessage = $"Exported CSV to {dialog.FileName}";
+        await ExportService.ExportCsvAsync(path, Results.ToList(), CancellationToken.None).ConfigureAwait(true);
+        StatusMessage = $"Exported CSV to {path}";
     }
 
     [RelayCommand]
-    private void CopySelectedUsername()
+    private async Task CopySelectedUsernameAsync()
     {
         if (SelectedResult == null || string.IsNullOrWhiteSpace(SelectedResult.Username))
         {
@@ -265,7 +271,7 @@ public partial class DonutViewModel : ObservableObject
             return;
         }
 
-        Clipboard.SetDataObject(SelectedResult.Username, copy: true);
+        await _clipboard.SetTextAsync(SelectedResult.Username).ConfigureAwait(true);
         StatusMessage = $"Copied {SelectedResult.Username}.";
     }
 
@@ -292,7 +298,7 @@ public partial class DonutViewModel : ObservableObject
             return;
         }
 
-        Clipboard.SetDataObject(token, copy: true);
+        await _clipboard.SetTextAsync(token).ConfigureAwait(true);
         StatusMessage =
             $"Copied Minecraft access token for {SelectedResult.Username}. "
             + "Paste in artuurssclient Accounts → Session (not Refresh Token).";
@@ -304,11 +310,9 @@ public partial class DonutViewModel : ObservableObject
         var accounts = await CollectReadyAccountsAsync().ConfigureAwait(true);
         if (accounts.Count == 0)
         {
-            MessageBox.Show(
+            await _dialogs.AlertAsync(
                 "No ready accounts with stored access tokens. Refresh Pool/Accounts first.",
-                "Export sessions",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
+                "Export sessions").ConfigureAwait(true);
             return;
         }
 
@@ -321,34 +325,34 @@ public partial class DonutViewModel : ObservableObject
                 continue;
             }
 
-            // Meteor SessionAccount accepts the Minecraft JWT access token as the session value.
             lines.Add(token.Trim());
         }
 
         if (lines.Count == 0)
         {
-            MessageBox.Show("Could not read any access tokens from secure storage.", "Export sessions",
-                MessageBoxButton.OK, MessageBoxImage.Warning);
+            await _dialogs.WarnAsync("Could not read any access tokens from secure storage.", "Export sessions")
+                .ConfigureAwait(true);
             return;
         }
 
-        var dialog = new SaveFileDialog
-        {
-            Filter = "Text (*.txt)|*.txt",
-            FileName = $"meteor_sessions_{lines.Count}_{DateTime.Now:yyyyMMdd_HHmmss}.txt"
-        };
-        if (dialog.ShowDialog() != true)
+        var path = await _dialogs.PickSaveFileAsync(
+            "Save Meteor SESSION tokens",
+            "Text",
+            $"meteor_sessions_{lines.Count}_{DateTime.Now:yyyyMMdd_HHmmss}.txt",
+            null,
+            "txt").ConfigureAwait(true);
+        if (path is null)
         {
             return;
         }
 
-        await File.WriteAllLinesAsync(dialog.FileName, lines).ConfigureAwait(true);
-        Clipboard.SetDataObject(string.Join(Environment.NewLine, lines), copy: true);
+        await File.WriteAllLinesAsync(path, lines).ConfigureAwait(true);
+        await _clipboard.SetTextAsync(string.Join(Environment.NewLine, lines)).ConfigureAwait(true);
         StatusMessage =
-            $"Exported {lines.Count} Minecraft access JWT(s) to {dialog.FileName} (also copied). "
+            $"Exported {lines.Count} Minecraft access JWT(s) to {path} (also copied). "
             + "In artuurssclient: Accounts → Session → paste one JWT and Add. "
             + "Do NOT use Refresh Token for these — that field needs the OAuth refresh token (M.C…), not the JWT.";
-        MessageBox.Show(StatusMessage, "Export sessions", MessageBoxButton.OK, MessageBoxImage.Information);
+        await _dialogs.AlertAsync(StatusMessage, "Export sessions").ConfigureAwait(true);
     }
 
     [RelayCommand]
@@ -357,8 +361,8 @@ public partial class DonutViewModel : ObservableObject
         var accounts = await CollectReadyAccountsAsync().ConfigureAwait(true);
         if (accounts.Count == 0)
         {
-            MessageBox.Show("No ready accounts with stored access tokens.", "Export sessions",
-                MessageBoxButton.OK, MessageBoxImage.Information);
+            await _dialogs.AlertAsync("No ready accounts with stored access tokens.", "Export sessions")
+                .ConfigureAwait(true);
             return;
         }
 
@@ -379,18 +383,19 @@ public partial class DonutViewModel : ObservableObject
             lines.Add($"{name}:{uuid}:{token.Trim()}");
         }
 
-        var dialog = new SaveFileDialog
-        {
-            Filter = "Text (*.txt)|*.txt",
-            FileName = $"session_lines_{DateTime.Now:yyyyMMdd_HHmmss}.txt"
-        };
-        if (dialog.ShowDialog() != true)
+        var path = await _dialogs.PickSaveFileAsync(
+            "Save detailed session lines",
+            "Text",
+            $"session_lines_{DateTime.Now:yyyyMMdd_HHmmss}.txt",
+            null,
+            "txt").ConfigureAwait(true);
+        if (path is null)
         {
             return;
         }
 
-        await File.WriteAllLinesAsync(dialog.FileName, lines).ConfigureAwait(true);
-        StatusMessage = $"Wrote {lines.Count - 1} detailed session line(s) to {dialog.FileName}";
+        await File.WriteAllLinesAsync(path, lines).ConfigureAwait(true);
+        StatusMessage = $"Wrote {lines.Count - 1} detailed session line(s) to {path}";
     }
 
     private async Task<IReadOnlyList<AccountRecord>> CollectReadyAccountsAsync()

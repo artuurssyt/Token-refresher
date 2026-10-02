@@ -1,7 +1,8 @@
 ﻿using System.Windows;
 using System.Windows.Threading;
-using LocaltsAccountManager.App.ViewModels;
+using LocaltsAccountManager.App.Services;
 using LocaltsAccountManager.Infrastructure;
+using LocaltsAccountManager.ViewModels;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace LocaltsAccountManager.App;
@@ -35,6 +36,9 @@ public partial class App : Application
         {
             var services = new ServiceCollection();
             services.AddLocaltsAccountManagerInfrastructure();
+            services.AddSingleton<IUiDispatcher, WpfUiDispatcher>();
+            services.AddSingleton<IUiDialogs, WpfUiDialogs>();
+            services.AddSingleton<IClipboardService, WpfClipboardService>();
             services.AddSingleton<MainViewModel>();
             services.AddSingleton<DonutViewModel>();
             services.AddSingleton<MainWindow>();

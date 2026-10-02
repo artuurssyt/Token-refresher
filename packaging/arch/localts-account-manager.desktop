@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
 Name=Localts Account Manager
-Comment=Refresh authorized Microsoft/Minecraft accounts (Windows WPF via Wine)
+Comment=Refresh authorized Microsoft/Minecraft accounts (native Linux GUI)
 Exec=localts-account-manager
-Icon=wine
+Icon=utilities-terminal
 Terminal=false
 Categories=Utility;
 Keywords=minecraft;microsoft;token;localts;

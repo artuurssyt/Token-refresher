@@ -32,20 +32,80 @@ public static class ApplicationPaths
     /// <summary>Database file shared by the account and batch repositories.</summary>
     public static string DatabaseFile => Path.Combine(LocalAppDataRoot, "accounts.db");
 
-    /// <summary>Folder holding DPAPI-protected credential blobs.</summary>
+    /// <summary>Folder holding encrypted credential blobs (DPAPI on Windows, AES files on Linux).</summary>
     public static string CredentialsDirectory => Path.Combine(LocalAppDataRoot, "credentials");
 
     /// <summary>
-    /// Local AppData, falling back to the install directory when Windows reports no profile
-    /// folder. Without the fallback an empty value silently turned every app path into a relative
-    /// one rooted at the current working directory.
+    /// Local AppData on Windows, or XDG data home on Linux (`~/.local/share`). Falls back to the
+    /// install directory when no profile folder exists so paths never become CWD-relative.
     /// </summary>
     private static string LocalAppDataBase
     {
         get
         {
+            if (!OperatingSystem.IsWindows())
+            {
+                var xdg = Environment.GetEnvironmentVariable("XDG_DATA_HOME");
+                if (!string.IsNullOrWhiteSpace(xdg))
+                {
+                    return xdg;
+                }
+
+                var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                if (!string.IsNullOrWhiteSpace(home))
+                {
+                    return Path.Combine(home, ".local", "share");
+                }
+            }
+
             var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             return string.IsNullOrWhiteSpace(localAppData) ? InstallDirectory : localAppData;
+        }
+    }
+
+    /// <summary>
+    /// Creates the app data and credentials folders. On Unix, restricts them to the current user
+    /// (0700) so token blobs are not world-readable.
+    /// </summary>
+    public static void EnsureDataLayout()
+    {
+        Directory.CreateDirectory(LocalAppDataRoot);
+        Directory.CreateDirectory(CredentialsDirectory);
+        RestrictUserOnlyDirectory(LocalAppDataRoot);
+        RestrictUserOnlyDirectory(CredentialsDirectory);
+    }
+
+    internal static void RestrictUserOnlyDirectory(string path)
+    {
+        if (OperatingSystem.IsWindows() || string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
+        {
+            return;
+        }
+
+        try
+        {
+            File.SetUnixFileMode(
+                path,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+        }
+    }
+
+    internal static void RestrictUserOnlyFile(string path)
+    {
+        if (OperatingSystem.IsWindows() || string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            return;
+        }
+
+        try
+        {
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
         }
     }
 

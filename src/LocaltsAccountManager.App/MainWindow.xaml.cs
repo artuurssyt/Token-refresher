@@ -1,5 +1,5 @@
 ﻿using System.Windows;
-using LocaltsAccountManager.App.ViewModels;
+using LocaltsAccountManager.ViewModels;
 
 namespace LocaltsAccountManager.App;
 

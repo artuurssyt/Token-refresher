@@ -1,9 +1,4 @@
 using System.Collections.ObjectModel;
-using System.ComponentModel;
-using System.IO;
-using System.Windows;
-using System.Windows.Data;
-using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using LocaltsAccountManager.Core.Enums;
@@ -11,9 +6,8 @@ using LocaltsAccountManager.Core.Interfaces;
 using LocaltsAccountManager.Core.Models;
 using LocaltsAccountManager.Infrastructure.Import;
 using LocaltsAccountManager.Infrastructure.Paths;
-using Microsoft.Win32;
 
-namespace LocaltsAccountManager.App.ViewModels;
+namespace LocaltsAccountManager.ViewModels;
 
 public partial class MainViewModel : ObservableObject
 {
@@ -28,9 +22,11 @@ public partial class MainViewModel : ObservableObject
     private readonly IAuthenticationProfileStore _profileStore;
     private readonly IAppSettingsStore _settingsStore;
     private readonly ILocaltsService _localtsService;
-    private readonly DispatcherTimer _countdownTimer;
-    private readonly DispatcherTimer _poolAutoManageTimer;
-    private readonly ICollectionView _libraryView;
+    private readonly IUiDialogs _dialogs;
+    private readonly IUiDispatcher _ui;
+    private readonly IClipboardService _clipboard;
+    private readonly Timer _countdownTimer;
+    private readonly Timer _poolAutoManageTimer;
 
     private BatchRecord? _currentBatch;
     private AccountRowViewModel? _selectedAccount;
@@ -47,7 +43,10 @@ public partial class MainViewModel : ObservableObject
         IAuthenticationProfileStore profileStore,
         IAppSettingsStore settingsStore,
         ILocaltsService localtsService,
-        DonutViewModel donut)
+        DonutViewModel donut,
+        IUiDialogs dialogs,
+        IUiDispatcher ui,
+        IClipboardService clipboard)
     {
         _importService = importService;
         _batchProcessor = batchProcessor;
@@ -60,22 +59,24 @@ public partial class MainViewModel : ObservableObject
         _profileStore = profileStore;
         _settingsStore = settingsStore;
         _localtsService = localtsService;
+        _dialogs = dialogs;
+        _ui = ui;
+        _clipboard = clipboard;
         Donut = donut;
         _batchProcessor.ProgressChanged += OnBatchProgressChanged;
         _poolProcessor.ProgressChanged += OnPoolProgressChanged;
 
-        _libraryView = CollectionViewSource.GetDefaultView(LibraryAccounts);
-        _libraryView.Filter = FilterLibraryAccount;
+        _countdownTimer = new Timer(
+            _ => _ui.Post(RefreshCountdowns),
+            null,
+            TimeSpan.FromSeconds(1),
+            TimeSpan.FromSeconds(1));
 
-        _countdownTimer = new DispatcherTimer
-        {
-            Interval = TimeSpan.FromSeconds(1)
-        };
-        _countdownTimer.Tick += (_, _) => RefreshCountdowns();
-        _countdownTimer.Start();
-
-        _poolAutoManageTimer = new DispatcherTimer();
-        _poolAutoManageTimer.Tick += (_, _) => _ = RunPoolAutoManageAsync();
+        _poolAutoManageTimer = new Timer(
+            _ => _ui.Post(() => _ = RunPoolAutoManageAsync()),
+            null,
+            Timeout.InfiniteTimeSpan,
+            Timeout.InfiniteTimeSpan);
     }
 
     public DonutViewModel Donut { get; }
@@ -86,7 +87,7 @@ public partial class MainViewModel : ObservableObject
 
     public ObservableCollection<AccountLibraryItemViewModel> LibraryAccounts { get; } = new();
 
-    public ICollectionView LibraryView => _libraryView;
+    public ObservableCollection<AccountLibraryItemViewModel> VisibleLibraryAccounts { get; } = new();
 
     [ObservableProperty]
     private string _librarySearchText = string.Empty;
@@ -136,7 +137,7 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private bool _poolAutoManageEnabled;
 
-    partial void OnLibrarySearchTextChanged(string value) => _libraryView.Refresh();
+    partial void OnLibrarySearchTextChanged(string value) => RefreshLibraryFilter();
 
     partial void OnPoolAutoManageEnabledChanged(bool value)
     {
@@ -150,7 +151,6 @@ public partial class MainViewModel : ObservableObject
         settings.PoolAutoManageOptInAcknowledged = true;
         _settingsStore.Save(settings);
 
-        _poolAutoManageTimer.Stop();
         if (value)
         {
             StartPoolAutoManageTimer();
@@ -158,6 +158,7 @@ public partial class MainViewModel : ObservableObject
         }
         else
         {
+            _poolAutoManageTimer.Change(Timeout.Infinite, Timeout.Infinite);
             PoolStatusMessage = "Pool auto-refresh off. Use Refresh Pool when you want to refresh.";
         }
     }
@@ -213,57 +214,48 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private async Task ImportTxtAsync()
     {
-        var dialog = new OpenFileDialog
-        {
-            Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*"
-        };
-
-        if (dialog.ShowDialog() != true)
+        var path = await _dialogs.PickOpenFileAsync("Import credentials into this batch", "Text files", "txt")
+            .ConfigureAwait(true);
+        if (path is null)
         {
             return;
         }
 
         try
         {
-            _currentBatch = await _importService.ImportFileAsync(dialog.FileName, ImportDestination.ActiveOnly).ConfigureAwait(true);
+            _currentBatch = await _importService.ImportFileAsync(path, ImportDestination.ActiveOnly).ConfigureAwait(true);
             await ReloadAccountsAsync().ConfigureAwait(true);
             await ReloadPoolAccountsAsync().ConfigureAwait(true);
             StatusMessage =
-                $"Imported {_currentBatch.TotalRecords} records from {Path.GetFileName(dialog.FileName)} into this batch (not added to Pool). Click Start Processing to refresh.";
+                $"Imported {_currentBatch.TotalRecords} records from {Path.GetFileName(path)} into this batch (not added to Pool). Click Start Processing to refresh.";
             NotifyBatchCommands();
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, "Import failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            await _dialogs.ErrorAsync(ex.Message, "Import failed").ConfigureAwait(true);
         }
     }
 
     [RelayCommand]
     private async Task ExtractMsaRefreshTokensAsync()
     {
-        var open = new OpenFileDialog
-        {
-            Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*",
-            Title = "Select dump / credential file"
-        };
-
-        if (open.ShowDialog() != true)
+        var openPath = await _dialogs.PickOpenFileAsync("Select dump / credential file", "Text files", "txt")
+            .ConfigureAwait(true);
+        if (openPath is null)
         {
             return;
         }
 
         try
         {
-            await using var stream = File.OpenRead(open.FileName);
+            await using var stream = File.OpenRead(openPath);
             var extracted = await Task.Run(() => RefreshTokenLineExtractor.ExtractFromStream(stream)).ConfigureAwait(true);
 
             if (extracted.Lines.Count == 0)
             {
-                MessageBox.Show(
+                await _dialogs.AlertAsync(
                     $"No MSA refresh tokens found.\nScanned: {extracted.ScannedLines}\nMissing refresh: {extracted.MissingRefresh}\nMalformed: {extracted.Malformed}",
-                    "Extract MSA refresh tokens",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Information);
+                    "Extract MSA refresh tokens").ConfigureAwait(true);
                 return;
             }
 
@@ -278,15 +270,14 @@ public partial class MainViewModel : ObservableObject
             Directory.CreateDirectory(exportDir);
             var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
             var defaultName = $"msa_refresh_extracted_{stamp}.txt";
-            var save = new SaveFileDialog
-            {
-                Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*",
-                Title = "Save extracted username:refresh lines",
-                InitialDirectory = exportDir,
-                FileName = defaultName
-            };
+            var savePath = await _dialogs.PickSaveFileAsync(
+                "Save extracted username:refresh lines",
+                "Text files",
+                defaultName,
+                exportDir,
+                "txt").ConfigureAwait(true);
 
-            if (save.ShowDialog() != true)
+            if (savePath is null)
             {
                 return;
             }
@@ -297,23 +288,21 @@ public partial class MainViewModel : ObservableObject
             };
             outputLines.AddRange(RefreshTokenLineExtractor.ToUsernameTokenLines(extracted.Lines));
 
-            await File.WriteAllLinesAsync(save.FileName, outputLines).ConfigureAwait(true);
+            await File.WriteAllLinesAsync(savePath, outputLines).ConfigureAwait(true);
 
             LastExportSummary =
                 $"Extracted {extracted.Lines.Count} MSA refresh line(s) from {extracted.ScannedLines} scanned.\n"
                 + $"Missing refresh: {extracted.MissingRefresh}, malformed: {extracted.Malformed}\n"
-                + $"Saved to:\n{save.FileName}";
+                + $"Saved to:\n{savePath}";
             StatusMessage = LastExportSummary;
 
-            var importNow = MessageBox.Show(
+            var importNow = await _dialogs.ConfirmAsync(
                 $"{LastExportSummary}\n\nImport into this batch now?",
-                "Extract complete",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Question);
+                "Extract complete").ConfigureAwait(true);
 
-            if (importNow == MessageBoxResult.Yes)
+            if (importNow)
             {
-                _currentBatch = await _importService.ImportFileAsync(save.FileName, ImportDestination.ActiveOnly).ConfigureAwait(true);
+                _currentBatch = await _importService.ImportFileAsync(savePath, ImportDestination.ActiveOnly).ConfigureAwait(true);
                 await ReloadAccountsAsync().ConfigureAwait(true);
                 await ReloadPoolAccountsAsync().ConfigureAwait(true);
                 StatusMessage =
@@ -323,30 +312,27 @@ public partial class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, "Extract failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            await _dialogs.ErrorAsync(ex.Message, "Extract failed").ConfigureAwait(true);
         }
     }
 
     [RelayCommand]
     private async Task ImportTxtToPoolAsync()
     {
-        var dialog = new OpenFileDialog
-        {
-            Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*"
-        };
-
-        if (dialog.ShowDialog() != true)
+        var path = await _dialogs.PickOpenFileAsync("Import credentials into Pool", "Text files", "txt")
+            .ConfigureAwait(true);
+        if (path is null)
         {
             return;
         }
 
         try
         {
-            _currentBatch = await _importService.ImportFileAsync(dialog.FileName, ImportDestination.Pool).ConfigureAwait(true);
+            _currentBatch = await _importService.ImportFileAsync(path, ImportDestination.Pool).ConfigureAwait(true);
             await ReloadAccountsAsync().ConfigureAwait(true);
             await ReloadPoolAccountsAsync().ConfigureAwait(true);
             StatusMessage =
-                $"Imported {_currentBatch.TotalRecords} records from {Path.GetFileName(dialog.FileName)} into Pool. "
+                $"Imported {_currentBatch.TotalRecords} records from {Path.GetFileName(path)} into Pool. "
                 + "Accounts already in the pool stay refreshable on the Batch tab via Start Processing.";
             PoolStatusMessage = StatusMessage;
             NotifyBatchCommands();
@@ -354,26 +340,23 @@ public partial class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, "Import failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            await _dialogs.ErrorAsync(ex.Message, "Import failed").ConfigureAwait(true);
         }
     }
 
     [RelayCommand]
     private async Task ImportActiveTxtAsync()
     {
-        var dialog = new OpenFileDialog
-        {
-            Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*"
-        };
-
-        if (dialog.ShowDialog() != true)
+        var path = await _dialogs.PickOpenFileAsync("Import credentials into Accounts", "Text files", "txt")
+            .ConfigureAwait(true);
+        if (path is null)
         {
             return;
         }
 
         try
         {
-            _currentBatch = await _importService.ImportFileAsync(dialog.FileName, ImportDestination.ActiveOnly).ConfigureAwait(true);
+            _currentBatch = await _importService.ImportFileAsync(path, ImportDestination.ActiveOnly).ConfigureAwait(true);
             await ReloadAccountsAsync().ConfigureAwait(true);
             LibraryStatusMessage =
                 $"Imported {_currentBatch.TotalRecords} account(s) for active library only — not added to pool. Starting refresh...";
@@ -383,7 +366,7 @@ public partial class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, "Import failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            await _dialogs.ErrorAsync(ex.Message, "Import failed").ConfigureAwait(true);
         }
     }
 
@@ -418,12 +401,11 @@ public partial class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            await Application.Current.Dispatcher.InvokeAsync(() =>
-                MessageBox.Show(ex.Message, "Localts import failed", MessageBoxButton.OK, MessageBoxImage.Error));
+            await _dialogs.ErrorAsync(ex.Message, "Localts import failed").ConfigureAwait(true);
         }
         finally
         {
-            await Application.Current.Dispatcher.InvokeAsync(NotifyPoolCommands);
+            await _ui.InvokeAsync(NotifyPoolCommands).ConfigureAwait(true);
         }
     }
 
@@ -432,7 +414,7 @@ public partial class MainViewModel : ObservableObject
     {
         if (string.IsNullOrWhiteSpace(LocaltsApiKeyInput))
         {
-            MessageBox.Show("Paste your Localts API key first.", "Localts API key", MessageBoxButton.OK, MessageBoxImage.Information);
+            await _dialogs.AlertAsync("Paste your Localts API key first.", "Localts API key").ConfigureAwait(true);
             return;
         }
 
@@ -446,7 +428,7 @@ public partial class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, "Localts API key", MessageBoxButton.OK, MessageBoxImage.Error);
+            await _dialogs.ErrorAsync(ex.Message, "Localts API key").ConfigureAwait(true);
         }
     }
 
@@ -477,12 +459,11 @@ public partial class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            await Application.Current.Dispatcher.InvokeAsync(() =>
-                MessageBox.Show(ex.Message, "Pool refresh failed", MessageBoxButton.OK, MessageBoxImage.Error));
+            await _dialogs.ErrorAsync(ex.Message, "Pool refresh failed").ConfigureAwait(true);
         }
         finally
         {
-            await Application.Current.Dispatcher.InvokeAsync(NotifyPoolCommands);
+            await _ui.InvokeAsync(NotifyPoolCommands).ConfigureAwait(true);
         }
     }
 
@@ -503,7 +484,7 @@ public partial class MainViewModel : ObservableObject
             ? $"Export {ready} pool token(s) now — one .txt per username in a ZIP. Continue?"
             : "No active pool tokens yet. Refresh the pool first. Continue anyway?";
 
-        if (MessageBox.Show(prompt, "Export pool ZIP", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+        if (!await _dialogs.ConfirmAsync(prompt, "Export pool ZIP", warning: true).ConfigureAwait(true))
         {
             return;
         }
@@ -519,22 +500,21 @@ public partial class MainViewModel : ObservableObject
 
             LastExportSummary = summary;
             PoolStatusMessage = summary;
-            MessageBox.Show(summary, "Pool export complete", MessageBoxButton.OK, MessageBoxImage.Information);
+            await _dialogs.AlertAsync(summary, "Pool export complete").ConfigureAwait(true);
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, "Pool ZIP export failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            await _dialogs.ErrorAsync(ex.Message, "Pool ZIP export failed").ConfigureAwait(true);
         }
     }
 
     [RelayCommand(CanExecute = nameof(CanExportPoolRefreshTokens))]
     private async Task ExportPoolRefreshTokensAsync()
     {
-        if (MessageBox.Show(
+        if (!await _dialogs.ConfirmAsync(
                 $"Export Microsoft refresh tokens for {PoolTotal} pool account(s)? These are long-lived secrets.",
                 "Sensitive export",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Warning) != MessageBoxResult.Yes)
+                warning: true).ConfigureAwait(true))
         {
             return;
         }
@@ -545,11 +525,11 @@ public partial class MainViewModel : ObservableObject
             var summary = $"Pool refresh tokens exported to:\n{path}";
             LastExportSummary = summary;
             PoolStatusMessage = summary;
-            MessageBox.Show(summary, "Pool export complete", MessageBoxButton.OK, MessageBoxImage.Information);
+            await _dialogs.AlertAsync(summary, "Pool export complete").ConfigureAwait(true);
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, "Pool refresh token export failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            await _dialogs.ErrorAsync(ex.Message, "Pool refresh token export failed").ConfigureAwait(true);
         }
     }
 
@@ -589,12 +569,11 @@ public partial class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            await Application.Current.Dispatcher.InvokeAsync(() =>
-                MessageBox.Show(ex.Message, "Processing failed", MessageBoxButton.OK, MessageBoxImage.Error));
+            await _dialogs.ErrorAsync(ex.Message, "Processing failed").ConfigureAwait(true);
         }
         finally
         {
-            await Application.Current.Dispatcher.InvokeAsync(NotifyBatchCommands);
+            await _ui.InvokeAsync(NotifyBatchCommands).ConfigureAwait(true);
         }
     }
 
@@ -626,7 +605,7 @@ public partial class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, "Retry failed", MessageBoxButton.OK, MessageBoxImage.Warning);
+            await _dialogs.WarnAsync(ex.Message, "Retry failed").ConfigureAwait(true);
         }
         finally
         {
@@ -660,12 +639,11 @@ public partial class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            await Application.Current.Dispatcher.InvokeAsync(() =>
-                MessageBox.Show(ex.Message, "Refresh failed", MessageBoxButton.OK, MessageBoxImage.Warning));
+            await _dialogs.WarnAsync(ex.Message, "Refresh failed").ConfigureAwait(true);
         }
         finally
         {
-            await Application.Current.Dispatcher.InvokeAsync(NotifyBatchCommands);
+            await _ui.InvokeAsync(NotifyBatchCommands).ConfigureAwait(true);
         }
     }
 
@@ -677,7 +655,7 @@ public partial class MainViewModel : ObservableObject
             ? $"Export {ready} ready token(s) now — one .txt per username in a ZIP. The batch can keep running. Continue?"
             : "Creates access_tokens.zip — one .txt per username containing only the Minecraft access token. Continue?";
 
-        if (MessageBox.Show(prompt, "Mass extract", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+        if (!await _dialogs.ConfirmAsync(prompt, "Mass extract", warning: true).ConfigureAwait(true))
         {
             return;
         }
@@ -693,11 +671,11 @@ public partial class MainViewModel : ObservableObject
 
             LastExportSummary = summary;
             LibraryStatusMessage = summary;
-            MessageBox.Show(summary, "Export complete", MessageBoxButton.OK, MessageBoxImage.Information);
+            await _dialogs.AlertAsync(summary, "Export complete").ConfigureAwait(true);
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, "ZIP export failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            await _dialogs.ErrorAsync(ex.Message, "ZIP export failed").ConfigureAwait(true);
         }
     }
 
@@ -708,7 +686,7 @@ public partial class MainViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private void CopyLibraryUsername(AccountLibraryItemViewModel? item)
+    private async Task CopyLibraryUsernameAsync(AccountLibraryItemViewModel? item)
     {
         item ??= SelectedLibraryAccount;
         if (item == null)
@@ -717,7 +695,7 @@ public partial class MainViewModel : ObservableObject
             return;
         }
 
-        if (!TrySetClipboard(item.Username))
+        if (!await TrySetClipboardAsync(item.Username).ConfigureAwait(true))
         {
             return;
         }
@@ -726,7 +704,7 @@ public partial class MainViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private void CopyLibraryUuid(AccountLibraryItemViewModel? item)
+    private async Task CopyLibraryUuidAsync(AccountLibraryItemViewModel? item)
     {
         item ??= SelectedLibraryAccount;
         if (item == null)
@@ -741,7 +719,7 @@ public partial class MainViewModel : ObservableObject
             return;
         }
 
-        if (!TrySetClipboard(item.Uuid))
+        if (!await TrySetClipboardAsync(item.Uuid).ConfigureAwait(true))
         {
             return;
         }
@@ -766,7 +744,7 @@ public partial class MainViewModel : ObservableObject
             return;
         }
 
-        if (!TrySetClipboard(token))
+        if (!await TrySetClipboardAsync(token).ConfigureAwait(true))
         {
             return;
         }
@@ -798,7 +776,7 @@ public partial class MainViewModel : ObservableObject
             return;
         }
 
-        if (!TrySetClipboard(refresh))
+        if (!await TrySetClipboardAsync(refresh).ConfigureAwait(true))
         {
             return;
         }
@@ -807,17 +785,17 @@ public partial class MainViewModel : ObservableObject
             $"Copied OAuth refresh token for {item.Username}. Paste in artuurssclient Accounts → Refresh Token (or Microsoft).";
     }
 
-    private bool TrySetClipboard(string text)
+    private async Task<bool> TrySetClipboardAsync(string text)
     {
         try
         {
-            Clipboard.SetDataObject(text, copy: true);
+            await _clipboard.SetTextAsync(text).ConfigureAwait(true);
             return true;
         }
         catch (Exception ex)
         {
             LibraryStatusMessage = $"Clipboard failed: {ex.Message}";
-            MessageBox.Show(ex.Message, "Copy failed", MessageBoxButton.OK, MessageBoxImage.Warning);
+            await _dialogs.WarnAsync(ex.Message, "Copy failed").ConfigureAwait(true);
             return false;
         }
     }
@@ -837,20 +815,18 @@ public partial class MainViewModel : ObservableObject
                 .Count(line => !string.IsNullOrWhiteSpace(line));
             if (count == 0)
             {
-                MessageBox.Show(
+                await _dialogs.AlertAsync(
                     "No usernames in the current batch (Provided Name / MC Username are empty).",
-                    "Nothing to export",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Information);
+                    "Nothing to export").ConfigureAwait(true);
                 return;
             }
 
             LastExportSummary = $"Exported {count} username(s) to:\n{path}";
-            MessageBox.Show(LastExportSummary, "Export complete", MessageBoxButton.OK, MessageBoxImage.Information);
+            await _dialogs.AlertAsync(LastExportSummary, "Export complete").ConfigureAwait(true);
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, "Export failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            await _dialogs.ErrorAsync(ex.Message, "Export failed").ConfigureAwait(true);
         }
     }
 
@@ -862,11 +838,11 @@ public partial class MainViewModel : ObservableObject
             var path = await _exportService.ExportLibraryUsernamesAsync().ConfigureAwait(true);
             LastExportSummary = $"Active library usernames exported to:\n{path}";
             LibraryStatusMessage = LastExportSummary;
-            MessageBox.Show(LastExportSummary, "Export complete", MessageBoxButton.OK, MessageBoxImage.Information);
+            await _dialogs.AlertAsync(LastExportSummary, "Export complete").ConfigureAwait(true);
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, "Export failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            await _dialogs.ErrorAsync(ex.Message, "Export failed").ConfigureAwait(true);
         }
     }
 
@@ -878,11 +854,11 @@ public partial class MainViewModel : ObservableObject
             var path = await _exportService.ExportPoolUsernamesAsync().ConfigureAwait(true);
             LastExportSummary = $"Pool usernames exported to:\n{path}";
             PoolStatusMessage = LastExportSummary;
-            MessageBox.Show(LastExportSummary, "Export complete", MessageBoxButton.OK, MessageBoxImage.Information);
+            await _dialogs.AlertAsync(LastExportSummary, "Export complete").ConfigureAwait(true);
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, "Export failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            await _dialogs.ErrorAsync(ex.Message, "Export failed").ConfigureAwait(true);
         }
     }
 
@@ -894,11 +870,10 @@ public partial class MainViewModel : ObservableObject
             return;
         }
 
-        if (MessageBox.Show(
+        if (!await _dialogs.ConfirmAsync(
                 "This writes Minecraft access tokens (JWT) to disk. They are session secrets (~24h). Continue?",
                 "Sensitive export",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Warning) != MessageBoxResult.Yes)
+                warning: true).ConfigureAwait(true))
         {
             return;
         }
@@ -907,11 +882,11 @@ public partial class MainViewModel : ObservableObject
         {
             var path = await _exportService.ExportSuccessfulMinecraftAccessTokensAsync(_currentBatch.Id).ConfigureAwait(true);
             LastExportSummary = $"Minecraft access tokens exported to:\n{path}\n(and .json alongside it)";
-            MessageBox.Show(LastExportSummary, "Export complete", MessageBoxButton.OK, MessageBoxImage.Information);
+            await _dialogs.AlertAsync(LastExportSummary, "Export complete").ConfigureAwait(true);
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, "Export failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            await _dialogs.ErrorAsync(ex.Message, "Export failed").ConfigureAwait(true);
         }
     }
 
@@ -923,11 +898,10 @@ public partial class MainViewModel : ObservableObject
             return;
         }
 
-        if (MessageBox.Show(
+        if (!await _dialogs.ConfirmAsync(
                 "This writes Microsoft refresh tokens to disk. Continue?",
                 "Sensitive export",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Warning) != MessageBoxResult.Yes)
+                warning: true).ConfigureAwait(true))
         {
             return;
         }
@@ -936,11 +910,11 @@ public partial class MainViewModel : ObservableObject
         {
             var path = await _exportService.ExportSuccessfulRefreshTokensAsync(_currentBatch.Id).ConfigureAwait(true);
             LastExportSummary = $"Refresh tokens exported to:\n{path}";
-            MessageBox.Show(LastExportSummary, "Export complete", MessageBoxButton.OK, MessageBoxImage.Information);
+            await _dialogs.AlertAsync(LastExportSummary, "Export complete").ConfigureAwait(true);
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, "Export failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            await _dialogs.ErrorAsync(ex.Message, "Export failed").ConfigureAwait(true);
         }
     }
 
@@ -952,12 +926,10 @@ public partial class MainViewModel : ObservableObject
             return;
         }
 
-        var result = MessageBox.Show(
-            "This export contains sensitive credential lines. Continue?",
-            "Sensitive export",
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Warning);
-        if (result != MessageBoxResult.Yes)
+        if (!await _dialogs.ConfirmAsync(
+                "This export contains sensitive credential lines. Continue?",
+                "Sensitive export",
+                warning: true).ConfigureAwait(true))
         {
             return;
         }
@@ -973,11 +945,9 @@ public partial class MainViewModel : ObservableObject
         var mc = await _networkDiagnostics.TestMinecraftAsync().ConfigureAwait(true);
         var lt = await _networkDiagnostics.TestLocaltsAsync().ConfigureAwait(true);
 
-        MessageBox.Show(
+        await _dialogs.AlertAsync(
             $"Microsoft: {ms.Summary}\n\nMinecraft: {mc.Summary}\n\nLocalts: {lt.Summary}",
-            "Network diagnostics",
-            MessageBoxButton.OK,
-            MessageBoxImage.Information);
+            "Network diagnostics").ConfigureAwait(true);
     }
 
     public async Task InitializeAsync()
@@ -1029,16 +999,17 @@ public partial class MainViewModel : ObservableObject
 
     private void StartPoolAutoManageTimer()
     {
-        _poolAutoManageTimer.Stop();
         var settings = _settingsStore.Load();
         if (!settings.PoolAutoManageEnabled)
         {
+            _poolAutoManageTimer.Change(Timeout.Infinite, Timeout.Infinite);
             return;
         }
 
         var minutes = Math.Max(5, settings.PoolAutoRefreshIntervalMinutes);
-        _poolAutoManageTimer.Interval = TimeSpan.FromMinutes(minutes);
-        _poolAutoManageTimer.Start();
+        var period = TimeSpan.FromMinutes(minutes);
+        // First tick after the interval — never immediately on launch.
+        _poolAutoManageTimer.Change(period, period);
     }
 
     private async Task RunPoolAutoManageAsync()
@@ -1120,9 +1091,6 @@ public partial class MainViewModel : ObservableObject
         ExportFailedRecordsCommand.NotifyCanExecuteChanged();
         ExportAccessTokensZipCommand.NotifyCanExecuteChanged();
         RefreshPoolCommand.NotifyCanExecuteChanged();
-        StartProcessingCommand.NotifyCanExecuteChanged();
-        RetryFailedCommand.NotifyCanExecuteChanged();
-        RefreshBatchAccountCommand.NotifyCanExecuteChanged();
     }
 
     private void NotifyPoolCommands()
@@ -1138,13 +1106,8 @@ public partial class MainViewModel : ObservableObject
         RefreshBatchAccountCommand.NotifyCanExecuteChanged();
     }
 
-    private bool FilterLibraryAccount(object obj)
+    private bool MatchesLibraryFilter(AccountLibraryItemViewModel item)
     {
-        if (obj is not AccountLibraryItemViewModel item)
-        {
-            return false;
-        }
-
         if (string.IsNullOrWhiteSpace(LibrarySearchText))
         {
             return true;
@@ -1154,6 +1117,18 @@ public partial class MainViewModel : ObservableObject
         return item.Username.Contains(q, StringComparison.OrdinalIgnoreCase)
                || item.Uuid.Contains(q, StringComparison.OrdinalIgnoreCase)
                || item.Subtitle.Contains(q, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void RefreshLibraryFilter()
+    {
+        VisibleLibraryAccounts.Clear();
+        foreach (var item in LibraryAccounts)
+        {
+            if (MatchesLibraryFilter(item))
+            {
+                VisibleLibraryAccounts.Add(item);
+            }
+        }
     }
 
     private async Task ReloadLibraryAccountsAsync()
@@ -1169,7 +1144,7 @@ public partial class MainViewModel : ObservableObject
         }
 
         UpdateLibraryCounts();
-        _libraryView.Refresh();
+        RefreshLibraryFilter();
         ExportAccessTokensZipCommand.NotifyCanExecuteChanged();
     }
 
@@ -1232,13 +1207,13 @@ public partial class MainViewModel : ObservableObject
 
         if (showMessage)
         {
-            MessageBox.Show(LastExportSummary, "Export complete", MessageBoxButton.OK, MessageBoxImage.Information);
+            await _dialogs.AlertAsync(LastExportSummary, "Export complete").ConfigureAwait(true);
         }
     }
 
     private void OnBatchProgressChanged(object? sender, BatchProgressEventArgs e)
     {
-        Application.Current.Dispatcher.Invoke(() =>
+        _ui.Post(() =>
         {
             _currentBatch = e.Batch;
             Total = e.Batch.TotalRecords;
@@ -1281,6 +1256,7 @@ public partial class MainViewModel : ObservableObject
                     }
 
                     UpdateLibraryCounts();
+                    RefreshLibraryFilter();
                     ExportAccessTokensZipCommand.NotifyCanExecuteChanged();
                 }
                 else if (e.LastUpdatedAccount.ProcessingState == ProcessingState.Succeeded)
@@ -1290,6 +1266,7 @@ public partial class MainViewModel : ObservableObject
                     {
                         LibraryAccounts.Remove(libItem);
                         UpdateLibraryCounts();
+                        RefreshLibraryFilter();
                         ExportAccessTokensZipCommand.NotifyCanExecuteChanged();
                     }
                 }
@@ -1301,7 +1278,7 @@ public partial class MainViewModel : ObservableObject
 
     private void OnPoolProgressChanged(object? sender, PoolProgressEventArgs e)
     {
-        Application.Current.Dispatcher.Invoke(() =>
+        _ui.Post(() =>
         {
             PoolTotal = e.Total;
             PoolPending = e.Pending;
@@ -1345,6 +1322,7 @@ public partial class MainViewModel : ObservableObject
                     }
 
                     UpdateLibraryCounts();
+                    RefreshLibraryFilter();
                 }
             }
 
@@ -1444,18 +1422,21 @@ public partial class MainViewModel : ObservableObject
             row.RefreshCountdown();
         }
 
+        var expired = false;
         foreach (var item in LibraryAccounts.ToList())
         {
             item.RefreshExpiry();
             if (item.IsExpired)
             {
                 LibraryAccounts.Remove(item);
+                expired = true;
             }
         }
 
-        if (LibraryAccounts.Count != LibraryReadyCount)
+        if (expired || LibraryAccounts.Count != LibraryReadyCount)
         {
             UpdateLibraryCounts();
+            RefreshLibraryFilter();
             ExportAccessTokensZipCommand.NotifyCanExecuteChanged();
             ExportPoolZipCommand.NotifyCanExecuteChanged();
         }

@@ -1,44 +1,55 @@
 # Maintainer: artuurssyt
 # Local package: extract the GitHub Arch tarball, then run `makepkg -si` from this directory.
-# This is a Wine wrapper around the Windows WPF build. There is no native GTK/Qt GUI.
+# Native Avalonia linux-x64 GUI. Not Wine.
 
 pkgname=localts-account-manager
-pkgver=1.1.0
+pkgver=1.2.0
 pkgrel=1
-pkgdesc="Microsoft/Minecraft account manager (Windows WPF app via Wine)"
+pkgdesc="Microsoft/Minecraft account manager (native Avalonia GUI)"
 arch=('x86_64')
 url="https://github.com/artuurssyt/Token-refresher"
 license=('unknown')
 install=localts-account-manager.install
-depends=('wine')
+depends=(
+  'libx11'
+  'libice'
+  'libsm'
+  'libxext'
+  'libxrandr'
+  'libxi'
+  'libxcursor'
+  'libxrender'
+  'libxkbcommon'
+  'fontconfig'
+  'freetype2'
+  'harfbuzz'
+  'icu'
+  'mesa'
+  'ttf-dejavu'
+)
 optdepends=(
-  'winetricks: install Arial and other Wine helpers for WPF text'
-  'wine-mono: Wine default; not a substitute for .NET 8 Desktop Runtime'
-  'curl: download the Windows Desktop Runtime installer'
+  'xorg-xwayland: run the X11 window on a Wayland compositor'
 )
 source=(
-  "LocaltsAccountManager.App.exe"
   "localts-account-manager"
-  "install-dotnet-desktop-runtime.sh"
   "localts-account-manager.desktop"
 )
-# Filled in when the Windows single-file exe is published for this release.
 sha256sums=(
-  '8dbb07049d0dc78f1e03302fae2356e269b5b3e437ee78ec7c4329836e491f66'
-  'SKIP'
   'SKIP'
   'SKIP'
 )
 
 package() {
   install -d "$pkgdir/usr/share/localts-account-manager"
-  install -Dm644 "$srcdir/LocaltsAccountManager.App.exe" \
-    "$pkgdir/usr/share/localts-account-manager/LocaltsAccountManager.App.exe"
-
   install -Dm755 "$srcdir/localts-account-manager" \
-    "$pkgdir/usr/bin/localts-account-manager"
-  install -Dm755 "$srcdir/install-dotnet-desktop-runtime.sh" \
-    "$pkgdir/usr/bin/localts-account-manager-setup"
+    "$pkgdir/usr/share/localts-account-manager/localts-account-manager"
+
+  install -d "$pkgdir/usr/bin"
+  cat > "$pkgdir/usr/bin/localts-account-manager" <<'EOF'
+#!/usr/bin/env bash
+exec /usr/share/localts-account-manager/localts-account-manager "$@"
+EOF
+  chmod 755 "$pkgdir/usr/bin/localts-account-manager"
 
   install -Dm644 "$srcdir/localts-account-manager.desktop" \
     "$pkgdir/usr/share/applications/localts-account-manager.desktop"

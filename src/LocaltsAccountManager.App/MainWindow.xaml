@@ -218,7 +218,7 @@
                     </Grid>
 
                     <ListBox Grid.Row="2"
-                             ItemsSource="{Binding LibraryView}"
+                             ItemsSource="{Binding VisibleLibraryAccounts}"
                              SelectedItem="{Binding SelectedLibraryAccount}"
                              ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                         <ListBox.ItemContainerStyle>
@@ -258,7 +258,7 @@
                                         <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
                                     <Border Width="32" Height="32" CornerRadius="4" ClipToBounds="True" Background="#E8E8E8">
-                                        <Image Source="{Binding SkinImage}" Width="32" Height="32" Stretch="UniformToFill"/>
+                                        <Image Source="{Binding SkinImageUrl}" Width="32" Height="32" Stretch="UniformToFill"/>
                                     </Border>
                                     <StackPanel Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center">
                                         <StackPanel Orientation="Horizontal">

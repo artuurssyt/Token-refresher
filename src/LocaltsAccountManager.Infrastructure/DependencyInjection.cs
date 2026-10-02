@@ -1,4 +1,3 @@
-using System.Runtime.Versioning;
 using LocaltsAccountManager.Core.Interfaces;
 using LocaltsAccountManager.Infrastructure.Authentication;
 using LocaltsAccountManager.Infrastructure.Configuration;
@@ -7,6 +6,7 @@ using LocaltsAccountManager.Infrastructure.Export;
 using LocaltsAccountManager.Infrastructure.Import;
 using LocaltsAccountManager.Infrastructure.Localts;
 using LocaltsAccountManager.Infrastructure.Minecraft;
+using LocaltsAccountManager.Infrastructure.Paths;
 using LocaltsAccountManager.Infrastructure.Persistence;
 using LocaltsAccountManager.Infrastructure.Phase0;
 using LocaltsAccountManager.Infrastructure.Processing;
@@ -17,14 +17,14 @@ namespace LocaltsAccountManager.Infrastructure;
 
 public static class DependencyInjection
 {
-    [SupportedOSPlatform("windows")]
     public static IServiceCollection AddLocaltsAccountManagerInfrastructure(this IServiceCollection services)
     {
+        ApplicationPaths.EnsureDataLayout();
         AuthenticationProfileStore.EnsureTemplateExists();
 
         services.AddSingleton<SecretSafeLogger>();
         services.AddSingleton<ICredentialFingerprinter, CredentialFingerprinter>();
-        services.AddSingleton<ISecureCredentialStore, DpapiCredentialStore>();
+        services.AddSingleton<ISecureCredentialStore>(CreateCredentialStore);
         services.AddSingleton<IAuthenticationProfileStore, AuthenticationProfileStore>();
         services.AddSingleton<IAppSettingsStore, AppSettingsStore>();
         services.AddSingleton<ITxtCredentialParser, TxtCredentialParser>();
@@ -59,6 +59,18 @@ public static class DependencyInjection
         services.AddHttpClient("Diagnostics");
 
         return services;
+    }
+
+    private static ISecureCredentialStore CreateCredentialStore(IServiceProvider _)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+#pragma warning disable CA1416
+            return new DpapiCredentialStore();
+#pragma warning restore CA1416
+        }
+
+        return new AesFileCredentialStore();
     }
 
     public static async Task InitializeInfrastructureAsync(IServiceProvider services)

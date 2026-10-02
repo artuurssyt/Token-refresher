@@ -3,7 +3,7 @@ using LocaltsAccountManager.Core;
 using LocaltsAccountManager.Core.Enums;
 using LocaltsAccountManager.Core.Models;
 
-namespace LocaltsAccountManager.App.ViewModels;
+namespace LocaltsAccountManager.ViewModels;
 
 public partial class AccountRowViewModel : ObservableObject
 {

@@ -1,0 +1,279 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:LocaltsAccountManager.ViewModels"
+        x:Class="LocaltsAccountManager.Desktop.Views.MainWindow"
+        Title="Localts Account Manager"
+        Width="1280" Height="820"
+        MinWidth="960" MinHeight="640"
+        WindowStartupLocation="CenterScreen">
+    <Grid Margin="12" RowDefinitions="Auto,*,Auto">
+        <TextBlock Grid.Row="0" Text="{Binding AuthProfileStatus}" Margin="0,0,0,8"
+                   TextWrapping="Wrap" Classes="muted"/>
+
+        <TabControl Grid.Row="1">
+            <TabItem Header="Batch">
+                <Grid Margin="0,8,0,0" RowDefinitions="Auto,Auto,*,Auto">
+                    <WrapPanel Grid.Row="0" Margin="0,0,0,8">
+                        <Button Content="Import TXT" Command="{Binding ImportTxtCommand}" Margin="0,0,8,8"
+                                ToolTip.Tip="Import credentials into this batch only — not added to Pool. Then Start Processing."/>
+                        <Button Content="Extract MSA Refresh Tokens" Command="{Binding ExtractMsaRefreshTokensCommand}" Margin="0,0,8,8"
+                                ToolTip.Tip="From dump lines (REFRESHTOKEN: M.C…), write clean username:refresh lines for import."/>
+                        <Button Content="Start Processing" Command="{Binding StartProcessingCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Cancel" Command="{Binding CancelProcessingCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Retry Failed" Command="{Binding RetryFailedCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Export Usernames" Command="{Binding ExportUsernamesCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Export Access Tokens" Command="{Binding ExportAccessTokensCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Export Refresh Tokens" Command="{Binding ExportRefreshTokensCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Export Ready ZIP" Command="{Binding ExportAccessTokensZipCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Export Failed Records" Command="{Binding ExportFailedRecordsCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Diagnostics" Command="{Binding RunDiagnosticsCommand}" Margin="0,0,8,8"/>
+                    </WrapPanel>
+
+                    <UniformGrid Grid.Row="1" Columns="6" Margin="0,0,0,8">
+                        <TextBlock Text="{Binding Total, StringFormat=Total: {0}}"/>
+                        <TextBlock Text="{Binding Pending, StringFormat=Pending: {0}}"/>
+                        <TextBlock Text="{Binding Processing, StringFormat=Processing: {0}}"/>
+                        <TextBlock Text="{Binding Succeeded, StringFormat=Succeeded: {0}}"/>
+                        <TextBlock Text="{Binding Failed, StringFormat=Failed: {0}}"/>
+                        <TextBlock Text="{Binding RateLimited, StringFormat=Rate limited: {0}}"/>
+                    </UniformGrid>
+
+                    <DataGrid Grid.Row="2"
+                              ItemsSource="{Binding Accounts}"
+                              SelectedItem="{Binding SelectedAccount}"
+                              AutoGenerateColumns="False"
+                              IsReadOnly="True"
+                              CanUserReorderColumns="True">
+                        <DataGrid.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="Refresh account"
+                                          Command="{Binding RefreshBatchAccountCommand}"
+                                          CommandParameter="{Binding SelectedAccount}"/>
+                            </ContextMenu>
+                        </DataGrid.ContextMenu>
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Status" Binding="{Binding ProcessingState}" Width="120"/>
+                            <DataGridTextColumn Header="Provided Name" Binding="{Binding ProvidedUsername}" Width="120"/>
+                            <DataGridTextColumn Header="MC Username" Binding="{Binding AuthenticatedMinecraftUsername}" Width="120"/>
+                            <DataGridTextColumn Header="MC token" Binding="{Binding MinecraftTokenRemaining}" Width="120"/>
+                            <DataGridTextColumn Header="MC status" Binding="{Binding MinecraftTokenStatus}" Width="100"/>
+                            <DataGridTextColumn Header="MSA access" Binding="{Binding MicrosoftTokenRemaining}" Width="110"/>
+                            <DataGridTextColumn Header="Refresh updated" Binding="{Binding RefreshUpdatedText}" Width="130"/>
+                            <DataGridTextColumn Header="UUID" Binding="{Binding AuthenticatedMinecraftUuid}" Width="200"/>
+                            <DataGridTextColumn Header="Line" Binding="{Binding SourceLine}" Width="50"/>
+                            <DataGridTextColumn Header="Error" Binding="{Binding ErrorCategory}" Width="120"/>
+                            <DataGridTextColumn Header="Detail" Binding="{Binding ServiceErrorDetail}" Width="*"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <Border Grid.Row="3" Margin="0,8,0,0" Padding="8" BorderBrush="{StaticResource BorderSubtle}" BorderThickness="1" CornerRadius="4">
+                        <StackPanel>
+                            <TextBlock Text="Selected Record" FontWeight="SemiBold" Margin="0,0,0,6"/>
+                            <TextBlock Text="{Binding SelectedAccount.AuthenticatedMinecraftUsername, StringFormat=Username: {0}}"/>
+                            <TextBlock Text="{Binding SelectedMinecraftTokenRemaining, StringFormat=MC access remaining: {0}}"/>
+                            <TextBlock Text="{Binding SelectedAccount.ServiceErrorDetail, StringFormat=Detail: {0}}" TextWrapping="Wrap"/>
+                        </StackPanel>
+                    </Border>
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="Pool">
+                <Grid Margin="0,8,0,0" RowDefinitions="Auto,Auto,Auto,*,Auto">
+                    <WrapPanel Grid.Row="0" Margin="0,0,0,8">
+                        <Button Content="Import from Localts" Command="{Binding ImportFromLocaltsCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Import TXT to Pool" Command="{Binding ImportTxtToPoolCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Refresh Pool" Command="{Binding RefreshPoolCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Cancel" Command="{Binding CancelPoolCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Export Pool ZIP" Command="{Binding ExportPoolZipCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Export Pool Refresh Tokens" Command="{Binding ExportPoolRefreshTokensCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Export Pool Usernames" Command="{Binding ExportPoolUsernamesCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Export Meteor SESSION" Command="{Binding Donut.ExportMeteorSessionsCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Reload list" Command="{Binding ReloadPoolListCommand}" Margin="0,0,8,8"/>
+                        <CheckBox Content="Auto-refresh pool in background"
+                                  IsChecked="{Binding PoolAutoManageEnabled}"
+                                  VerticalAlignment="Center"
+                                  Margin="0,0,8,8"
+                                  ToolTip.Tip="Off by default. When on, refreshes expiring tokens on a timer — never automatically when you open the app."/>
+                    </WrapPanel>
+
+                    <Grid Grid.Row="1" Margin="0,0,0,8" ColumnDefinitions="*,Auto,Auto">
+                        <StackPanel Margin="0,0,8,0">
+                            <TextBlock Text="LOCALTS API KEY" FontSize="11" Classes="muted" Margin="0,0,0,4"/>
+                            <TextBox Watermark="Paste API key" PasswordChar="•"
+                                     Text="{Binding LocaltsApiKeyInput}"/>
+                        </StackPanel>
+                        <Button Grid.Column="1" Content="Save key" Command="{Binding SaveLocaltsApiKeyCommand}" Margin="0,0,8,0" VerticalAlignment="Bottom"/>
+                        <Button Grid.Column="2" Content="Test" Command="{Binding TestLocaltsConnectionCommand}" VerticalAlignment="Bottom"/>
+                    </Grid>
+
+                    <UniformGrid Grid.Row="2" Columns="6" Margin="0,0,0,8">
+                        <TextBlock Text="{Binding PoolTotal, StringFormat=Total: {0}}"/>
+                        <TextBlock Text="{Binding PoolPending, StringFormat=Pending: {0}}"/>
+                        <TextBlock Text="{Binding PoolReadyCount, StringFormat=Ready: {0}}"/>
+                        <TextBlock Text="{Binding PoolSucceeded, StringFormat=Succeeded: {0}}"/>
+                        <TextBlock Text="{Binding PoolFailed, StringFormat=Failed: {0}}"/>
+                        <TextBlock Text="{Binding PoolRemovedCount, StringFormat=Removed: {0}}"/>
+                    </UniformGrid>
+
+                    <DataGrid Grid.Row="3"
+                              ItemsSource="{Binding PoolAccounts}"
+                              SelectedItem="{Binding SelectedPoolAccount}"
+                              AutoGenerateColumns="False"
+                              IsReadOnly="True">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Status" Binding="{Binding ProcessingState}" Width="120"/>
+                            <DataGridTextColumn Header="Provided Name" Binding="{Binding ProvidedUsername}" Width="120"/>
+                            <DataGridTextColumn Header="MC Username" Binding="{Binding AuthenticatedMinecraftUsername}" Width="120"/>
+                            <DataGridTextColumn Header="MC token" Binding="{Binding MinecraftTokenRemaining}" Width="120"/>
+                            <DataGridTextColumn Header="MC status" Binding="{Binding MinecraftTokenStatus}" Width="100"/>
+                            <DataGridTextColumn Header="MSA access" Binding="{Binding MicrosoftTokenRemaining}" Width="110"/>
+                            <DataGridTextColumn Header="Refresh updated" Binding="{Binding RefreshUpdatedText}" Width="130"/>
+                            <DataGridTextColumn Header="UUID" Binding="{Binding AuthenticatedMinecraftUuid}" Width="200"/>
+                            <DataGridTextColumn Header="Error" Binding="{Binding ErrorCategory}" Width="120"/>
+                            <DataGridTextColumn Header="Detail" Binding="{Binding ServiceErrorDetail}" Width="*"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <StackPanel Grid.Row="4" Margin="0,8,0,0">
+                        <TextBlock Classes="muted" TextWrapping="Wrap" Text="{Binding LocaltsConnectionStatus}" Margin="0,0,0,4"/>
+                        <TextBlock Classes="muted" TextWrapping="Wrap" Text="{Binding PoolStatusMessage}"/>
+                    </StackPanel>
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="Accounts">
+                <Grid Margin="0,8,0,0" RowDefinitions="Auto,Auto,*,Auto">
+                    <Grid Grid.Row="0" Margin="0,0,0,12" ColumnDefinitions="*,Auto">
+                        <StackPanel>
+                            <TextBlock Text="SEARCH" FontSize="11" Classes="muted" Margin="0,0,0,4"/>
+                            <TextBox Text="{Binding LibrarySearchText}" Watermark="Search accounts…"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
+                            <Button Content="Import TXT" Command="{Binding ImportActiveTxtCommand}" Margin="0,0,8,0"/>
+                            <Button Content="Export Meteor SESSION" Command="{Binding Donut.ExportMeteorSessionsCommand}" Margin="0,0,8,0"/>
+                            <Button Content="Export ZIP" Command="{Binding ExportAccessTokensZipCommand}" Margin="0,0,8,0"/>
+                            <Button Content="Export Usernames" Command="{Binding ExportLibraryUsernamesCommand}" Margin="0,0,8,0"/>
+                            <Button Content="Refresh list" Command="{Binding RefreshLibraryCommand}"/>
+                        </StackPanel>
+                    </Grid>
+
+                    <Grid Grid.Row="1" Margin="0,0,0,8" ColumnDefinitions="*,Auto">
+                        <TextBlock>
+                            <Run Text="ACTIVE ACCOUNTS (" FontWeight="SemiBold"/>
+                            <Run Text="{Binding LibraryReadyCount}" FontWeight="SemiBold"/>
+                            <Run Text=")" FontWeight="SemiBold"/>
+                        </TextBlock>
+                        <TextBlock Grid.Column="1" Text="Valid tokens only — expired hidden" Classes="muted"/>
+                    </Grid>
+
+                    <ListBox Grid.Row="2"
+                             ItemsSource="{Binding VisibleLibraryAccounts}"
+                             SelectedItem="{Binding SelectedLibraryAccount}">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate DataType="vm:AccountLibraryItemViewModel">
+                                <Grid ColumnDefinitions="40,*,Auto,Auto" Margin="4">
+                                    <Border Width="32" Height="32" CornerRadius="4" Background="#3A3A3A">
+                                        <TextBlock Text="{Binding AvatarLetter}" HorizontalAlignment="Center" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                                    </Border>
+                                    <StackPanel Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <TextBlock Text="{Binding Username}" FontWeight="SemiBold" FontSize="15"/>
+                                            <TextBlock Text="{Binding Subtitle}" Classes="muted" VerticalAlignment="Center"/>
+                                        </StackPanel>
+                                        <TextBlock Text="{Binding Uuid}" FontSize="11" Classes="muted"/>
+                                    </StackPanel>
+                                    <TextBlock Grid.Column="2" Text="{Binding ExpiryText}" VerticalAlignment="Center" Margin="0,0,12,0" FontWeight="SemiBold"/>
+                                    <Button Grid.Column="3" Content="⋮" Width="32" Height="32" Padding="0"
+                                            Click="AccountMenuButton_Click"
+                                            Tag="{Binding}">
+                                        <Button.ContextMenu>
+                                            <ContextMenu>
+                                                <MenuItem Header="Copy username" Click="CopyUsername_Click"/>
+                                                <MenuItem Header="Copy UUID" Click="CopyUuid_Click"/>
+                                                <MenuItem Header="Copy Minecraft access token (Session)" Click="CopyAccessToken_Click"/>
+                                                <MenuItem Header="Copy OAuth refresh token (long-lived)" Click="CopyRefreshToken_Click"/>
+                                            </ContextMenu>
+                                        </Button.ContextMenu>
+                                    </Button>
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+
+                    <TextBlock Grid.Row="3" Margin="0,8,0,0" Classes="muted" TextWrapping="Wrap"
+                               Text="{Binding LibraryStatusMessage}"/>
+                </Grid>
+            </TabItem>
+
+            <TabItem Header="Donut">
+                <Grid Margin="0,8,0,0" DataContext="{Binding Donut}" RowDefinitions="Auto,Auto,Auto,*,Auto">
+                    <WrapPanel Grid.Row="0" Margin="0,0,0,8">
+                        <Button Content="Load from Batch" Command="{Binding LoadFromBatchCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Load from Pool" Command="{Binding LoadFromPoolCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Load from Accounts" Command="{Binding LoadFromAccountsCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Start scan" Command="{Binding StartScanCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Stop" Command="{Binding StopScanCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Export CSV" Command="{Binding ExportCsvCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Export Meteor SESSION" Command="{Binding ExportMeteorSessionsCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Export username:uuid:token" Command="{Binding ExportSessionLinesDetailedCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Copy username" Command="{Binding CopySelectedUsernameCommand}" Margin="0,0,8,8"/>
+                        <Button Content="Copy access token" Command="{Binding CopySelectedAccessTokenCommand}" Margin="0,0,8,8"/>
+                    </WrapPanel>
+
+                    <Grid Grid.Row="1" Margin="0,0,0,8" ColumnDefinitions="*,*,Auto">
+                        <StackPanel Margin="0,0,8,0">
+                            <TextBlock Text="HYPIXEL API KEY" FontSize="11" Classes="muted" Margin="0,0,0,4"/>
+                            <TextBox Text="{Binding HypixelApiKeyInput}" PasswordChar="•"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Margin="0,0,8,0">
+                            <TextBlock Text="DONUT API KEY (/api in game)" FontSize="11" Classes="muted" Margin="0,0,0,4"/>
+                            <TextBox Text="{Binding DonutApiKeyInput}" PasswordChar="•"/>
+                        </StackPanel>
+                        <Button Grid.Column="2" Content="Save keys" Command="{Binding SaveApiKeysCommand}" VerticalAlignment="Bottom"/>
+                    </Grid>
+
+                    <TextBlock Grid.Row="2" Text="{Binding SettingsSummary}" Classes="muted" Margin="0,0,0,8" TextWrapping="Wrap"/>
+
+                    <Grid Grid.Row="3" Margin="0,0,0,8" ColumnDefinitions="280,*">
+                        <DockPanel>
+                            <TextBlock DockPanel.Dock="Top" Text="USERNAMES" FontSize="11" Classes="muted" Margin="0,0,0,4"/>
+                            <TextBox Text="{Binding UsernameText}"
+                                     AcceptsReturn="True"
+                                     TextWrapping="NoWrap"
+                                     FontFamily="DejaVu Sans Mono, Consolas, monospace"
+                                     FontSize="12"/>
+                        </DockPanel>
+                        <DataGrid Grid.Column="1" Margin="8,0,0,0"
+                                  ItemsSource="{Binding Results}"
+                                  SelectedItem="{Binding SelectedResult}"
+                                  AutoGenerateColumns="False"
+                                  IsReadOnly="True">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="User" Binding="{Binding Username}" Width="120"/>
+                                <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="90"/>
+                                <DataGridTextColumn Header="Source" Binding="{Binding DonutSource}" Width="70"/>
+                                <DataGridTextColumn Header="Money" Binding="{Binding DonutMoney}" Width="100"/>
+                                <DataGridTextColumn Header="Shards" Binding="{Binding DonutShards}" Width="70"/>
+                                <DataGridTextColumn Header="Kills" Binding="{Binding DonutKills}" Width="70"/>
+                                <DataGridTextColumn Header="Deaths" Binding="{Binding DonutDeaths}" Width="70"/>
+                                <DataGridTextColumn Header="Playtime" Binding="{Binding DonutPlaytime}" Width="100"/>
+                                <DataGridTextColumn Header="Donut NW" Binding="{Binding DonutNetWorth}" Width="100"/>
+                                <DataGridTextColumn Header="Error" Binding="{Binding Error}" Width="*"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Grid>
+
+                    <StackPanel Grid.Row="4">
+                        <TextBlock Text="{Binding BridgeStatusText}" Margin="0,0,0,4"/>
+                        <TextBlock Text="{Binding StatusMessage}" TextWrapping="Wrap" Classes="muted"/>
+                    </StackPanel>
+                </Grid>
+            </TabItem>
+        </TabControl>
+
+        <StackPanel Grid.Row="2" Margin="0,8,0,0">
+            <TextBlock Text="{Binding StatusMessage}" Margin="0,0,0,4"/>
+            <TextBlock Text="{Binding LastExportSummary}" TextWrapping="Wrap" Classes="muted"/>
+        </StackPanel>
+    </Grid>
+</Window>

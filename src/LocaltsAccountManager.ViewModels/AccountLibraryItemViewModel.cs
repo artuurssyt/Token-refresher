@@ -1,11 +1,9 @@
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
 using CommunityToolkit.Mvvm.ComponentModel;
 using LocaltsAccountManager.Core;
 using LocaltsAccountManager.Core.Enums;
 using LocaltsAccountManager.Core.Models;
 
-namespace LocaltsAccountManager.App.ViewModels;
+namespace LocaltsAccountManager.ViewModels;
 
 public sealed partial class AccountLibraryItemViewModel : ObservableObject
 {
@@ -30,7 +28,10 @@ public sealed partial class AccountLibraryItemViewModel : ObservableObject
     private bool _hasAccessToken;
 
     [ObservableProperty]
-    private ImageSource? _skinImage;
+    private string _skinImageUrl = string.Empty;
+
+    public string AvatarLetter =>
+        string.IsNullOrWhiteSpace(Username) ? "?" : char.ToUpperInvariant(Username.Trim()[0]).ToString();
 
     public AccountRecord Record { get; private set; } = null!;
 
@@ -44,6 +45,7 @@ public sealed partial class AccountLibraryItemViewModel : ObservableObject
         HasAccessToken = !string.IsNullOrWhiteSpace(record.MinecraftAccessTokenReference);
         RefreshExpiry();
         LoadSkin();
+        OnPropertyChanged(nameof(AvatarLetter));
     }
 
     public void RefreshExpiry()
@@ -66,16 +68,8 @@ public sealed partial class AccountLibraryItemViewModel : ObservableObject
 
     private void LoadSkin()
     {
-        try
-        {
-            var key = !string.IsNullOrWhiteSpace(Uuid) ? Uuid : Username;
-            var uri = new Uri($"https://mc-heads.net/avatar/{Uri.EscapeDataString(key)}/32");
-            SkinImage = new BitmapImage(uri);
-        }
-        catch
-        {
-            SkinImage = null;
-        }
+        var key = !string.IsNullOrWhiteSpace(Uuid) ? Uuid : Username;
+        SkinImageUrl = $"https://mc-heads.net/avatar/{Uri.EscapeDataString(key)}/32";
     }
 
     private static string BuildSubtitle(AccountRecord record)

@@ -1,14 +1,14 @@
 ﻿# Localts Account Manager
 
-Windows desktop app for importing Microsoft/Minecraft account credentials you are authorized to use, refreshing them, and exporting usernames or tokens. Repo name on GitHub is **Token-refresher**.
+Desktop app for importing Microsoft/Minecraft account credentials you are authorized to use, refreshing them, and exporting usernames or tokens. Repo name on GitHub is **Token-refresher**.
 
-You do not need to message the owner to use this. Download or build, then follow the steps below.
+Windows uses the WPF app. Arch Linux uses a **native Avalonia** GUI (not Wine). You do not need to message the owner to use this.
 
 ## Download
 
-Pick your platform. These are **two separate GitHub Releases** (not one release with two files). Binaries are not in the git repo.
+Pick your platform. These are **separate GitHub Releases**. Binaries are not in the git repo.
 
-### Windows (native)
+### Windows (native WPF)
 
 **[Localts Account Manager v1.1.0 — Windows](https://github.com/artuurssyt/Token-refresher/releases/tag/v1.1.0-windows)**  
 **[Download `LocaltsAccountManager.App.exe`](https://github.com/artuurssyt/Token-refresher/releases/download/v1.1.0-windows/LocaltsAccountManager.App.exe)**
@@ -22,29 +22,31 @@ Windows 10 or 11, 64-bit.
 
 Older Windows build: **[v1.0.0](https://github.com/artuurssyt/Token-refresher/releases/tag/v1.0.0)**.
 
-### Linux (Arch) — Wine, not a native GUI
+### Linux (Arch) — native GUI
 
-**[Localts Account Manager v1.1.0 — Linux (Arch)](https://github.com/artuurssyt/Token-refresher/releases/tag/v1.1.0-linux-arch)**  
-**[Download `localts-account-manager-linux-arch.tar.gz`](https://github.com/artuurssyt/Token-refresher/releases/download/v1.1.0-linux-arch/localts-account-manager-linux-arch.tar.gz)**
+**[Localts Account Manager v1.2.0 — Linux (Arch)](https://github.com/artuurssyt/Token-refresher/releases/tag/v1.2.0-linux-arch)**  
+**[Download `localts-account-manager-linux-arch.tar.gz`](https://github.com/artuurssyt/Token-refresher/releases/download/v1.2.0-linux-arch/localts-account-manager-linux-arch.tar.gz)**
 
-There is **no native GTK/Qt/Wayland WPF port**. Arch runs the same Windows exe under Wine. Arch `dotnet-runtime` will not start this app.
-
-Copy-paste install: see **[docs/ARCH.md](docs/ARCH.md)**. Short version:
+This is a **self-contained linux-x64 Avalonia** desktop app. It is not Wine and not the WPF exe. Arch `wine` / `wine-mono` are not required. Copy-paste install: **[docs/ARCH.md](docs/ARCH.md)**.
 
 ```bash
-sudo pacman -S wine winetricks curl
+sudo pacman -S --needed libx11 libice libsm libxext libxrandr libxi libxcursor \
+  libxrender libxkbcommon fontconfig freetype2 harfbuzz icu mesa ttf-dejavu xorg-xwayland
 # download + extract the Arch tarball, then:
-chmod +x localts-account-manager install-dotnet-desktop-runtime.sh
-./install-dotnet-desktop-runtime.sh
+chmod +x localts-account-manager
 ./localts-account-manager
 ```
+
+The older [v1.1.0-linux-arch](https://github.com/artuurssyt/Token-refresher/releases/tag/v1.1.0-linux-arch) Wine wrapper is still on GitHub but is not the supported Arch build.
 
 ## Build from source
 
 Need the latest code, or there is no Release asset:
 
 1. Install the **[.NET 8 SDK](https://dotnet.microsoft.com/en-us/download/dotnet/8.0)** (includes the Desktop workload used by WPF).
-2. Clone and publish a single-file Windows x64 build:
+2. Clone and publish:
+
+Windows (WPF, self-contained):
 
 ```powershell
 git clone https://github.com/artuurssyt/Token-refresher.git
@@ -58,7 +60,7 @@ dotnet publish src\LocaltsAccountManager.App\LocaltsAccountManager.App.csproj `
 
 3. Run `publish\LocaltsAccountManager.App.exe`. A self-contained publish does **not** need the Desktop Runtime installed on the target PC. It is much larger than the framework-dependent Release exe.
 
-Framework-dependent publish (smaller, needs the Desktop Runtime on the PC that runs it):
+Framework-dependent Windows publish (smaller, needs the Desktop Runtime on the PC that runs it):
 
 ```powershell
 dotnet publish src\LocaltsAccountManager.App\LocaltsAccountManager.App.csproj `
@@ -67,17 +69,31 @@ dotnet publish src\LocaltsAccountManager.App\LocaltsAccountManager.App.csproj `
   -o ".\publish"
 ```
 
+Linux (native Avalonia, self-contained linux-x64):
+
+```bash
+dotnet publish src/LocaltsAccountManager.Desktop/LocaltsAccountManager.Desktop.csproj \
+  -c Release -r linux-x64 --self-contained true \
+  -p:PublishSingleFile=true \
+  -p:IncludeNativeLibrariesForSelfExtract=true \
+  -o ./publish-linux
+chmod +x publish-linux/LocaltsAccountManager.Desktop
+./publish-linux/LocaltsAccountManager.Desktop
+```
+
 Do not commit `publish\`, `Done builds\`, or `exports\`. They are gitignored.
 
-Do not publish the WPF app with `-r linux-x64` and ship it. The SDK may emit a Linux host, but it still requires `Microsoft.WindowsDesktop.App` and will not run on Arch. Use the [Wine/Arch release](https://github.com/artuurssyt/Token-refresher/releases/tag/v1.1.0-linux-arch) instead.
+Do not publish the WPF app (`LocaltsAccountManager.App`) with `-r linux-x64`. That still requires `Microsoft.WindowsDesktop.App`. Use `LocaltsAccountManager.Desktop` for Linux.
 
 **Solution:** `LocaltsAccountManager.sln`
 
 | Project | Role |
 |---------|------|
-| `src/LocaltsAccountManager.App` | WPF UI (this is what you publish) |
+| `src/LocaltsAccountManager.App` | Windows WPF UI |
+| `src/LocaltsAccountManager.Desktop` | Native Avalonia UI (Linux; also builds on Windows) |
+| `src/LocaltsAccountManager.ViewModels` | Shared ViewModels used by both UIs |
 | `src/LocaltsAccountManager.Core` | Models and settings |
-| `src/LocaltsAccountManager.Infrastructure` | Import, auth, SQLite, export |
+| `src/LocaltsAccountManager.Infrastructure` | Import, auth, SQLite, export, secret store |
 | `src/DonutComparer.Core` | Donut / Hypixel scan library used by the Donut tab |
 | `src/LocaltsAccountManager.Phase0` | Optional diagnostics console — you do not need it to run the app |
 | `tests/LocaltsAccountManager.Core.Tests` | Unit tests |
@@ -98,12 +114,12 @@ What is empty vs saved:
 - First run on this Windows user: tabs are empty until you import.
 - Later runs: Pool and Accounts come back from the local database. The last Batch is reloaded if one exists. Click **Start Processing** only if you want that batch to run again.
 
-Where files live (this Windows user only):
+Where files live (this user only):
 
-| What | Where |
-|------|--------|
-| Account database, settings, DPAPI-protected tokens, Localts API key | `%LOCALAPPDATA%\LocaltsAccountManager\` (`accounts.db`, `appsettings.json`, `authentication_profile.json`, `credentials\`) |
-| Exports (TXT / ZIP) | `exports\` next to the `.exe`. If that folder cannot be created, the app falls back to `%LOCALAPPDATA%\LocaltsAccountManager\exports\` |
+| What | Windows | Linux |
+|------|---------|-------|
+| Account database, settings, encrypted tokens, Localts API key | `%LOCALAPPDATA%\LocaltsAccountManager\` | `~/.local/share/LocaltsAccountManager/` |
+| Exports (TXT / ZIP) | `exports\` next to the `.exe`, else LocalAppData `\exports\` | `exports/` next to the binary, else `~/.local/share/LocaltsAccountManager/exports/` |
 
 Copying only the exe to another PC or another Windows user starts with an empty library. Secrets do not travel with the exe.
 
@@ -176,7 +192,7 @@ Persistent library of accounts you want to keep. Import here **does** save them 
 2. Click **Save key**, then **Test**.
 3. Status should show the Localts username. Then **Import from Localts** works.
 
-The key is stored with DPAPI under Local AppData. It is not written into the git repo.
+The key is stored in the local encrypted secret store under Local AppData / XDG data. It is not written into the git repo.
 
 ### Accounts
 
@@ -230,7 +246,7 @@ Do not upload any of these files. Do not attach them to GitHub issues.
 
 - **Refresh tokens (`M.C…`) are secrets.** Anyone with one can refresh that Microsoft/Minecraft login until it is revoked. Do not paste them in issues, Discord, or screenshots.
 - **Minecraft access JWTs (`eyJ…`) are session secrets** (~24 hours). Still do not share them.
-- Tokens and the Localts API key are stored with **Windows DPAPI for the current Windows user**. Another Windows account or another PC cannot decrypt `%LOCALAPPDATA%\LocaltsAccountManager\credentials\`.
+- Tokens and the Localts API key are stored encrypted for the current user. On Windows that is **DPAPI**. On Linux that is **AES-GCM** files under `~/.local/share/LocaltsAccountManager/credentials/` (directory `0700`, blobs `0600`). Another OS user cannot read them; copying Windows DPAPI blobs onto Linux will not decrypt.
 - Do not zip and share `exports\`, `accounts.db`, `appsettings.json`, or the LocalAppData folder.
 - This app is for accounts **you are authorized to use**.
 
@@ -261,16 +277,19 @@ A dump is a long line with email, password, `MCTOKEN`, `REFRESHTOKEN`, etc. Impo
 That is a Minecraft access JWT, not an MSA refresh token. Use **Extract MSA Refresh Tokens** on the original dump, or import `M.C…` lines.
 
 **Where are my tokens stored?**  
-Encrypted blobs under `%LOCALAPPDATA%\LocaltsAccountManager\credentials\`, indexed by `accounts.db`. Exports you click are plaintext files under `exports\` (or the save dialog location).
+Encrypted blobs under `%LOCALAPPDATA%\LocaltsAccountManager\credentials\` (Windows) or `~/.local/share/LocaltsAccountManager/credentials/` (Linux), indexed by `accounts.db`. Exports you click are plaintext files under `exports\` (or the save dialog location).
+
+**Linux or macOS?**  
+macOS: no. **Arch Linux has a native Avalonia GUI** — use the [Linux (Arch) release](https://github.com/artuurssyt/Token-refresher/releases/tag/v1.2.0-linux-arch) and [docs/ARCH.md](docs/ARCH.md). Do not publish the WPF project for Linux. Other distros can run the same linux-x64 binary if the X11/font libraries listed in ARCH.md are installed.
 
 **I copied the folder to another PC and accounts vanished**  
-DPAPI is per Windows user/machine. The database may copy but secrets will not decrypt. Re-import refresh tokens on the new PC.
+Windows DPAPI is per Windows user/machine. Linux AES blobs travel with `store.key` in the same `credentials/` folder, but another user account still cannot read `0700` files. Re-import refresh tokens on a new machine if secrets do not decrypt.
 
 **Can I share refresh tokens or upload AppData?**  
 No.
 
 **There is no exe on GitHub / git clone has no `Done builds`**  
-Binaries are gitignored (GitHub file-size limits). Use the [Windows release](https://github.com/artuurssyt/Token-refresher/releases/tag/v1.1.0-windows), the [Arch release](https://github.com/artuurssyt/Token-refresher/releases/tag/v1.1.0-linux-arch), or [Build from source](#build-from-source).
+Binaries are gitignored (GitHub file-size limits). Use the [Windows release](https://github.com/artuurssyt/Token-refresher/releases/tag/v1.1.0-windows), the [Arch native release](https://github.com/artuurssyt/Token-refresher/releases/tag/v1.2.0-linux-arch), or [Build from source](#build-from-source).
 
 **Antivirus says the exe is malware**  
 Common false positive on unsigned .NET single-file publishes. Check the hash against the Release asset you downloaded. Build from source if you do not want to trust a binary.
@@ -284,11 +303,8 @@ Yes. On the Accounts tab, Import TXT starts processing immediately. On the Batch
 **Donut scan does nothing / bridge errors**  
 Account refresh does not need Donut. For scans: join DonutSMP, enable PlayerCheckerBridge in artuurssclient on this PC, then Start scan. Hypixel/Donut API keys are optional extras on that tab.
 
-**Linux or macOS?**  
-macOS: no. Linux: not a native WPF port. **Arch is supported via Wine** — use the [Linux (Arch) release](https://github.com/artuurssyt/Token-refresher/releases/tag/v1.1.0-linux-arch) and [docs/ARCH.md](docs/ARCH.md). Arch `dotnet-runtime` / `wine-mono` cannot run this GUI. Other distros can follow the same Wine + Windows Desktop Runtime steps, but only Arch packaging (`PKGBUILD`, tarball) is published.
-
 **How do I update?**  
-Download the new exe from Releases (or publish again). Your library stays in `%LOCALAPPDATA%\LocaltsAccountManager\` as long as you are the same Windows user. You can delete the old exe.
+Download the new binary from Releases (or publish again). Your library stays in `%LOCALAPPDATA%\LocaltsAccountManager\` (Windows) or `~/.local/share/LocaltsAccountManager/` (Linux) as long as you are the same user. You can delete the old exe/binary.
 
 **Where do I get a Localts API key?**  
 From your account on [localts.store](https://localts.store). Paste it on the Pool tab. This repo does not issue keys.

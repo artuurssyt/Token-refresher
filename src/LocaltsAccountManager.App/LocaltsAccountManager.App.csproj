@@ -3,6 +3,7 @@
   <ItemGroup>
     <ProjectReference Include="..\LocaltsAccountManager.Core\LocaltsAccountManager.Core.csproj" />
     <ProjectReference Include="..\LocaltsAccountManager.Infrastructure\LocaltsAccountManager.Infrastructure.csproj" />
+    <ProjectReference Include="..\LocaltsAccountManager.ViewModels\LocaltsAccountManager.ViewModels.csproj" />
     <ProjectReference Include="..\DonutComparer.Core\DonutComparer.Core.csproj" />
   </ItemGroup>
 

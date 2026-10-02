@@ -1,115 +1,110 @@
 # Localts Account Manager on Arch Linux
 
-This is **not** a native Linux GUI. Localts Account Manager is a **.NET 8 WPF** desktop app. WPF does not run on GTK, Qt, or Wayland. The supported Arch path is **Wine + the Windows x64 .NET 8 Desktop Runtime** installed *inside* a Wine prefix.
+This is a **native Avalonia** desktop GUI (`linux-x64`), not Wine and not WPF. The same Batch / Pool / Accounts / Donut tabs as the Windows app.
 
-Arch packages named `dotnet-runtime`, `dotnet-runtime-8.0`, or `wine-mono` will **not** start this GUI.
-
-- Native `dotnet-runtime` is a Linux runtime. It cannot load `Microsoft.WindowsDesktop.App` / WPF.
-- `wine-mono` is Wine's stand-in for the old .NET *Framework*, not .NET 8 WPF.
-
-`dotnet publish -r linux-x64` on the App project produces a Linux host that still requires `Microsoft.WindowsDesktop.App`. That binary is not shipped; it would fail immediately on Arch.
-
-Phase0 is a small Windows diagnostics console that uses DPAPI credential storage. It is not a Linux rewrite of the app and is not included here.
+The older **v1.1.0-linux-arch** tarball was a Wine wrapper around the Windows exe. That release is kept for history. Use **v1.2.0-linux-arch** (or newer) for the native app.
 
 ## Quick start (extract the release tarball)
 
 ```bash
-sudo pacman -S wine winetricks curl
+sudo pacman -S --needed xorg-xwayland libx11 libice libsm libxext libxrandr libxi libxcursor \
+  libxrender libxkbcommon fontconfig freetype2 harfbuzz icu mesa ttf-dejavu
 
 mkdir -p ~/localts-account-manager
 cd ~/localts-account-manager
 curl -L -o localts-account-manager-linux-arch.tar.gz \
-  https://github.com/artuurssyt/Token-refresher/releases/download/v1.1.0-linux-arch/localts-account-manager-linux-arch.tar.gz
+  https://github.com/artuurssyt/Token-refresher/releases/download/v1.2.0-linux-arch/localts-account-manager-linux-arch.tar.gz
 tar xf localts-account-manager-linux-arch.tar.gz
 cd localts-account-manager-linux-arch
-chmod +x localts-account-manager install-dotnet-desktop-runtime.sh
-
-# Once per machine: install Microsoft's Windows Desktop Runtime into this app's Wine prefix
-./install-dotnet-desktop-runtime.sh
-
-# Run (does not auto-refresh tokens)
+chmod +x localts-account-manager
 ./localts-account-manager
 ```
 
-Optional desktop entry after extract (so the app appears in your menu):
+The binary is **self-contained**. You do **not** need Arch `dotnet-runtime`, Wine, or `wine-mono`.
+
+Optional desktop entry after extract:
 
 ```bash
 mkdir -p ~/.local/share/applications
 cp localts-account-manager.desktop ~/.local/share/applications/
-# If you did not install with makepkg, point Exec at the extracted launcher:
 sed -i "s|^Exec=.*|Exec=$PWD/localts-account-manager|" ~/.local/share/applications/localts-account-manager.desktop
 ```
 
 ## Install with makepkg
 
-From the same extracted directory (PKGBUILD lives next to the exe):
+From the extracted directory:
 
 ```bash
-sudo pacman -S --needed base-devel wine winetricks curl
+sudo pacman -S --needed base-devel
 makepkg -si
-localts-account-manager-setup
 localts-account-manager
-```
-
-`makepkg -si` copies the Windows exe to `/usr/share/localts-account-manager/` and a launcher to `/usr/bin/localts-account-manager`. You still must run `localts-account-manager-setup` (or `./install-dotnet-desktop-runtime.sh`) so Wine has the **Windows** .NET 8 Desktop Runtime.
-
-## What the setup script does
-
-`install-dotnet-desktop-runtime.sh` (installed as `localts-account-manager-setup`):
-
-1. Creates `~/.local/share/localts-account-manager/wineprefix` (`WINEARCH=win64`) if needed.
-2. Downloads Microsoft's [Windows x64 .NET 8 Desktop Runtime](https://dotnet.microsoft.com/en-us/download/dotnet/8.0) (`https://aka.ms/dotnet/8.0/windowsdesktop-runtime-win-x64.exe`).
-3. Runs that installer with `wine`.
-4. If `winetricks` is present, installs Arial (WPF text is often blank without a core font).
-
-Override the installer URL if you already have a specific patch build:
-
-```bash
-export DOTNET_DESKTOP_RUNTIME_URL='https://builds.dotnet.microsoft.com/dotnet/WindowsDesktop/8.0.21/windowsdesktop-runtime-8.0.21-win-x64.exe'
-./install-dotnet-desktop-runtime.sh
-```
-
-Manual equivalent:
-
-```bash
-export WINEPREFIX="$HOME/.local/share/localts-account-manager/wineprefix"
-export WINEARCH=win64
-wineboot --init
-curl -L -o /tmp/windowsdesktop-runtime-8.0-win-x64.exe \
-  https://aka.ms/dotnet/8.0/windowsdesktop-runtime-win-x64.exe
-wine /tmp/windowsdesktop-runtime-8.0-win-x64.exe /install /quiet /norestart
-winetricks -q arial
 ```
 
 ## Where data lives
 
-| What | Location under Wine |
-|------|---------------------|
-| Account database, settings, DPAPI-protected tokens, Localts API key | `$WINEPREFIX/drive_c/users/$USER/AppData/Local/LocaltsAccountManager/` |
-| Default Wine prefix used by the launcher | `~/.local/share/localts-account-manager/wineprefix` |
-| Exports | `exports\` next to the exe if that folder is writable; otherwise the LocalAppData path above |
+| What | Location |
+|------|----------|
+| Account database, settings, encrypted tokens, Localts API key | `~/.local/share/LocaltsAccountManager/` (`accounts.db`, `appsettings.json`, `authentication_profile.json`, `credentials/`) |
+| Donut/Hypixel API keys | `~/.local/share/DonutHypixelPlayerComparer/` |
+| Exports | `exports/` next to the binary if writable; otherwise `~/.local/share/LocaltsAccountManager/exports/` |
 
-This is **not** `~/.local/share/LocaltsAccountManager` on the Linux side. DPAPI blobs are scoped to the Wine "Windows user". Copying only the exe to another machine starts with an empty library.
+Override the data root with `XDG_DATA_HOME` (then the app uses `$XDG_DATA_HOME/LocaltsAccountManager`).
 
-To wipe the Wine prefix and start over:
+Linux secrets are AES-GCM files under `credentials/` (mode `0600`) plus a `store.key` file. They are **not** Windows DPAPI blobs and will not decrypt if you copy a Windows `%LOCALAPPDATA%\LocaltsAccountManager\credentials` folder onto Linux.
 
-```bash
-rm -rf ~/.local/share/localts-account-manager/wineprefix
-./install-dotnet-desktop-runtime.sh
-```
+Copying only the binary to another user or machine starts with an empty library.
 
 ## Launch notes
 
 - First launch does **not** refresh tokens. Import a TXT, then click **Start Processing** (Batch) or **Refresh Pool**.
-- WPF on Wine needs a 64-bit prefix (`WINEARCH=win64`). Do not create a 32-bit prefix.
-- If the window is missing or text is invisible, install `winetricks` and run `WINEPREFIX=... winetricks -q arial`.
-- SmartScreen does not apply on Linux. Unsigned exe warnings are a Windows-only note.
+- **Auto-refresh pool in background** is off by default and does not run on open.
+- On Wayland, the app uses X11 via XWayland (`xorg-xwayland`). A pure Wayland session without XWayland may fail to open a window.
+- If fonts look missing, install `ttf-dejavu` (or another TTF package) and `fontconfig`.
 
-## Verify the exe hash
+## Packages (native GUI)
 
-The tarball includes `SHA256SUMS`. Compare it to the Windows release asset; they are the same framework-dependent `LocaltsAccountManager.App.exe`.
+Self-contained binary still needs these **OS** libraries:
+
+```bash
+sudo pacman -S --needed libx11 libice libsm libxext libxrandr libxi libxcursor libxrender \
+  libxkbcommon fontconfig freetype2 harfbuzz icu mesa ttf-dejavu xorg-xwayland
+```
+
+| Package | Why |
+|---------|-----|
+| `libx11` `libice` `libsm` `libxext` `libxrandr` `libxi` `libxcursor` `libxrender` | X11 / windowing |
+| `libxkbcommon` | Keyboard |
+| `fontconfig` `freetype2` `harfbuzz` `ttf-dejavu` | Text |
+| `icu` | .NET globalization |
+| `mesa` | Skia / GL fallback |
+| `xorg-xwayland` | Window on Wayland compositors |
+
+You do **not** need `wine`, `winetricks`, or `dotnet-runtime`.
+
+## Verify the binary hash
+
+The tarball includes `SHA256SUMS`. Compare it to the GitHub Release asset.
 
 ```
-SHA-256  LocaltsAccountManager.App.exe
-8dbb07049d0dc78f1e03302fae2356e269b5b3e437ee78ec7c4329836e491f66
+SHA-256  localts-account-manager
+84116333ba8dfea439e03f1d92d8fadb25ee180d031171add61a232ef22bfcf0
+
+SHA-256  localts-account-manager-linux-arch.tar.gz
+a50c3a6cf760bbf5bdb6547cbef4f1a31a7dea03e69453c824c8639785613548
+```
+
+## Build from source (Linux)
+
+Needs the [.NET 8 SDK](https://dotnet.microsoft.com/en-us/download/dotnet/8.0).
+
+```bash
+git clone https://github.com/artuurssyt/Token-refresher.git
+cd Token-refresher
+dotnet publish src/LocaltsAccountManager.Desktop/LocaltsAccountManager.Desktop.csproj \
+  -c Release -r linux-x64 --self-contained true \
+  -p:PublishSingleFile=true \
+  -p:IncludeNativeLibrariesForSelfExtract=true \
+  -o ./publish-linux
+chmod +x publish-linux/LocaltsAccountManager.Desktop
+./publish-linux/LocaltsAccountManager.Desktop
 ```

@@ -4,9 +4,13 @@ namespace DonutComparer.Core.Infrastructure;
 
 internal static partial class NativeDpapi
 {
-    public static byte[] Protect(byte[] bytes) => Transform(bytes, true);
-    public static byte[] Unprotect(byte[] bytes) => Transform(bytes, false);
+    public static byte[] Protect(byte[] bytes) =>
+        OperatingSystem.IsWindows() ? Transform(bytes, true) : AesLocalProtector.Protect(bytes);
 
+    public static byte[] Unprotect(byte[] bytes) =>
+        OperatingSystem.IsWindows() ? Transform(bytes, false) : AesLocalProtector.Unprotect(bytes);
+
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     private static byte[] Transform(byte[] bytes, bool protect)
     {
         using var input = BlobOwner.Create(bytes);

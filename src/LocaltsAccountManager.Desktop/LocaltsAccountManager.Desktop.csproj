@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>LocaltsAccountManager.Desktop</RootNamespace>
+    <AssemblyName>LocaltsAccountManager.Desktop</AssemblyName>
+    <Version>1.2.0</Version>
+    <ApplicationTitle>Localts Account Manager</ApplicationTitle>
+    <AvaloniaUseCompiledBindingsByDefault>false</AvaloniaUseCompiledBindingsByDefault>
+    <RuntimeIdentifiers>linux-x64</RuntimeIdentifiers>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\LocaltsAccountManager.Core\LocaltsAccountManager.Core.csproj" />
+    <ProjectReference Include="..\LocaltsAccountManager.Infrastructure\LocaltsAccountManager.Infrastructure.csproj" />
+    <ProjectReference Include="..\LocaltsAccountManager.ViewModels\LocaltsAccountManager.ViewModels.csproj" />
+    <ProjectReference Include="..\DonutComparer.Core\DonutComparer.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.3.4" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.4" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.4" />
+    <PackageReference Include="Avalonia.Controls.DataGrid" Version="11.3.4" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.11" />
+  </ItemGroup>
+
+</Project>
